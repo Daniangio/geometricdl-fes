@@ -1,6 +1,7 @@
 import json
 import pickle
 import torch
+
 from torch_geometric.data import Data
 import pandas as pd
 import functools
@@ -9,9 +10,13 @@ from torch_cluster import radius_graph
 
 from torch.utils.data import Dataset as BaseDataset
 
-def create_transform(data_dir, labels_file, n_samples):
+def create_transform(data_dir, labels_file, normalize_labels=True):
     with open(labels_file, "r") as t:
-        labels = [[float(v)] for v in t.readlines()][:n_samples]
+        labels = torch.as_tensor([[float(v)] for v in t.readlines()])
+        if normalize_labels:
+            labels_std = torch.std(labels, dim=0)
+            labels_mean = torch.mean(labels, dim=0)
+            labels = ((labels - labels_mean) / labels_std).reshape(shape=(len(labels), 1))
     return functools.partial(prepare_transform, data_dir=data_dir, labels=labels)
 
 
@@ -49,14 +54,14 @@ def prepare_transform(item, data_dir, labels=None):
 
     with open(f'{data_dir}/{item["graph_index"]}-dihedrals-graph.pickle', "rb") as p:
         debruijn = pickle.load(p)
-    edge_attr = torch.tensor(debruijn, dtype=torch.float32)
+    edge_attr = debruijn[0]
 
     # apply random rotation
     # pos = torch.einsum('zij,zaj->zai', o3.rand_matrix(len(pos)), pos)
     node_input = torch.tensor(one_hot, dtype=torch.float32)
     node_attr = torch.tensor(one_hot, dtype=torch.float32)
 
-    label = torch.tensor(labels[item['graph_index']]) if labels else None
+    label = labels[item['graph_index']] if labels is not None else None
 
     # print(time.time() - t)
     return pos, edge_index, node_input, node_attr, edge_attr, label
@@ -88,7 +93,8 @@ class Dataset(BaseDataset):
                  node_input=node_input,
                  node_attr=node_attr,
                  edge_attr=edge_attr,
-                 label=label)
+                 label=label,
+                 graph_index=self.indexes[i])
         return d
 
     def __len__(self):
