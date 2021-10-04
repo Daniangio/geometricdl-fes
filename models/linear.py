@@ -7,8 +7,8 @@ class LinearNet(LightningModule):
     def __init__(self, sample, lr, momentum, output_dim: int=1, hidden_dims: list=[256, 1024, 128, 64]):
         super(LinearNet, self).__init__()
         self.name = 'linear'
-        self.nodes = sample.edge_attr.size(0) // sample.label.size(0)
-        self.nodes_features = sample.edge_attr.size(1)
+        self.nodes = sample.x.size(0) // sample.label.size(0)
+        self.nodes_features = sample.x.size(1)
         self.lr = lr
         self.momentum = momentum
         self.criterion = nn.SmoothL1Loss(beta=1.0)
@@ -32,7 +32,7 @@ class LinearNet(LightningModule):
         self.output = nn.Linear(last_dim, output_dim)
 
     def forward(self, sample):
-        x = sample.edge_attr
+        x = sample.x
         x = x.view(len(sample.label), -1)
         for l in self.linears:
             x = l(x)
