@@ -10,18 +10,25 @@ from torch_cluster import radius_graph
 
 from torch.utils.data import Dataset as BaseDataset
 
-def create_transform(data_dir, labels_file, normalize_labels=True):
+def create_transform(data_dir, labels_file, use_dihedrals: bool, normalize_labels: bool=True):
     with open(labels_file, "r") as t:
         labels = torch.as_tensor([[float(v)] for v in t.readlines()])
         if normalize_labels:
             labels_std = torch.std(labels, dim=0)
             labels_mean = torch.mean(labels, dim=0)
             labels = ((labels - labels_mean) / labels_std).reshape(shape=(len(labels), 1))
-    return functools.partial(prepare_transform, data_dir=data_dir, labels=labels)
+    return functools.partial(prepare_transform, data_dir=data_dir, use_dihedrals=use_dihedrals, labels=labels)
 
 
-def prepare_transform(item, data_dir, labels=None):
+def prepare_transform(item, data_dir: str, use_dihedrals: bool, labels: torch.Tensor=None):
     # t = time.time()
+    label = labels[item['graph_index']] if labels is not None else None
+
+    if use_dihedrals:
+        with open(f'{data_dir}/{item["graph_index"]}-dihedrals-graph.pickle', "rb") as p:
+            debruijn = pickle.load(p)
+        debruijn_node_input, debruijn_edge_index, _ = debruijn
+        return None, debruijn_edge_index, debruijn_node_input, None, None, label
     element_mapping = {
         'C': 0,
         'O': 1,
@@ -52,16 +59,11 @@ def prepare_transform(item, data_dir, labels=None):
     max_radius = 10.0
     edge_index = radius_graph(pos, max_radius, max_num_neighbors=10)
 
-    with open(f'{data_dir}/{item["graph_index"]}-dihedrals-graph.pickle', "rb") as p:
-        debruijn = pickle.load(p)
-    edge_attr = debruijn[0]
-
     # apply random rotation
     # pos = torch.einsum('zij,zaj->zai', o3.rand_matrix(len(pos)), pos)
     node_input = torch.tensor(one_hot, dtype=torch.float32)
-    node_attr = torch.tensor(one_hot, dtype=torch.float32)
-
-    label = labels[item['graph_index']] if labels is not None else None
+    node_attr = torch.tensor([], dtype=torch.float32)
+    edge_attr = torch.tensor([], dtype=torch.float32)
 
     # print(time.time() - t)
     return pos, edge_index, node_input, node_attr, edge_attr, label
@@ -71,10 +73,6 @@ class Dataset(BaseDataset):
         self.data_dir = data_dir
         self.indexes = indexes
         self.transform = transform
-        self.max_label_value = 1.0 # 150.0
-    
-    def normalize(self, label):
-        return label  # / self.max_label_value
 
     def __getitem__(self, i): 
         try:
@@ -87,10 +85,9 @@ class Dataset(BaseDataset):
             df.to_pickle("{}/{}-graph-df.pickle".format(self.data_dir, self.indexes[i]))
             m = {'atoms': df, 'graph_index': self.indexes[i]}
         pos, edge_index, node_input, node_attr, edge_attr, label = self.transform(m)
-        label = self.normalize(label)
-        d = Data(pos=pos,
+        d = Data(x=node_input,
+                 pos=pos,
                  edge_index=edge_index,
-                 node_input=node_input,
                  node_attr=node_attr,
                  edge_attr=edge_attr,
                  label=label,
