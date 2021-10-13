@@ -19,12 +19,14 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 import horovod.torch as hvd
+from models.geometric import GeometricNet, ConvNetwork, OLDGeometricNet
 
 from models.linear import LinearNet
-from models.graphdihedrals import GraphConvPoolNet
+from models.graphdihedrals import BISGraphConvPoolNet, GraphConvPoolNet
 from dataset import Dataset, create_transform
 
 from torch_geometric.loader import DataLoader
+from ray.tune.integration.pytorch_lightning import TuneReportCallback
 
 # Training settings
 parser = argparse.ArgumentParser(description='FES computation of Alanine Dipeptide using Geometric Deep Learning')
@@ -52,7 +54,7 @@ parser.add_argument('--gradient-predivide-factor', type=float, default=1.0,
                     help='apply gradient predivide factor in optimizer (default: 1.0)')
 parser.add_argument('--data-dir', default='/scratch/carrad/free-energy-gnn/ala_dipep_old',
                     help='location of the training dataset in the local filesystem')
-parser.add_argument('--labels_file', default='/scratch/carrad/free-energy-gnn/free-energy-old.dat',
+parser.add_argument('--labels-file', default='/scratch/carrad/free-energy-gnn/free-energy-old.dat',
                     help='file containing the energy values associated with each frame')
 parser.add_argument('--weights', default=None,
                     help='file containing the model weights to be loaded before training')
@@ -76,25 +78,35 @@ def load_indexes(data_dir, test_on, n_samples=50000):
     print('loading indexes')
     with open(f'{data_dir}/left.json', 'r') as l:
         left = json.load(l)
+        random.shuffle(left)
 
     with open(f"{data_dir}/right.json", "r") as r:
         right = json.load(r)
+        random.shuffle(right)
 
     if test_on == 'all_but_left':
         train_ind = left[::2] # take 50% of left area as training
         remaining_ind = [i for i in range(n_samples) if i not in left]
+        random.shuffle(remaining_ind)
     elif test_on == 'all_but_right':
         train_ind = right[::2] # take 50% of right area as training
         remaining_ind = [i for i in range(n_samples) if i not in right]
+        random.shuffle(remaining_ind)
     elif test_on == 'left':
         remaining_ind = left
-        train_ind = [i for i in range(n_samples) if i not in remaining_ind][::5] # take 20% of non-left area as training
+        train_ind = [i for i in range(n_samples) if i not in remaining_ind]
+        random.shuffle(train_ind)
+        train_ind = train_ind[::5] # take 20% of non-left area as training
     elif test_on == 'right':
         remaining_ind = right
-        train_ind = [i for i in range(n_samples) if i not in remaining_ind][::5] # take 20% of non-right area as training
-
-    random.shuffle(train_ind)
-    random.shuffle(remaining_ind)
+        train_ind = [i for i in range(n_samples) if i not in remaining_ind]
+        random.shuffle(train_ind)
+        train_ind = train_ind[::5] # take 20% of non-right area as training
+    elif test_on == 'all':
+        all_indexes = [i for i in range(n_samples)]
+        random.shuffle(all_indexes)
+        train_ind = all_indexes[::5]
+        remaining_ind = [i for i in range(n_samples) if i not in train_ind]
 
     split = int(0.1 * len(remaining_ind))
     validation_ind = remaining_ind[:split]
@@ -136,7 +148,7 @@ def test(model: LightningModule, test_loader, test_sampler):
 
 
 def save_results(model, train_indexes, test_indexes, test_loss, predictions, targets, test_on, args):
-    directory = f"results/{test_on}/{model.name}-old-{datetime.now().strftime('%m%d-%H%M')}-mae:{test_loss:.2f}"
+    directory = f"results/{test_on}/{model.name}-old-{datetime.now().strftime('%m%d-%H%M')}-{model.test_criterion_initials}:{test_loss:.2f}"
     sorted_predictions = [pred[0] for pred in sorted(predictions, key=lambda x: x[1])]
     sorted_targets = [target for target in sorted(targets, key=lambda x: x[1])]
     test_frames = [int(frame[1]) for frame in sorted_targets]
@@ -153,6 +165,7 @@ def save_results(model, train_indexes, test_indexes, test_loss, predictions, tar
                 "momentum": args.momentum,
                 "seed": args.seed
             },
+            "test_loss": test_loss,
             "predicted": sorted_predictions,
             "target": sorted_targets,
             "test_frames": test_frames,
@@ -179,7 +192,8 @@ if __name__ == '__main__':
     
     models = {
         'linear': (LinearNet, True), # Model, use_dihedrals
-        'graph': (GraphConvPoolNet, True) # Model, use_dihedrals
+        'graph': (GraphConvPoolNet, True),
+        'geometric': (ConvNetwork, False)
     }
 
     # get data
@@ -219,17 +233,19 @@ if __name__ == '__main__':
         train_percent = 1.0
         val_percent = 1.0
 
-        model = models[args.model][0](next(iter(train_loader)), args.lr, args.momentum)
         if args.checkpoint:
-            model.load_from_checkpoint(checkpoint_path=args.checkpoint, sample=next(iter(train_loader)), lr=args.lr, momentum=args.momentum)
+            assert not args.weights, 'Params --weights and --checkpoint are mutually exclusive'
+            print(f'Loading model from checkpoint: {args.checkpoint}')
+            model = models[args.model][0].load_from_checkpoint(checkpoint_path=args.checkpoint, sample=next(iter(train_loader)), lr=args.lr, momentum=args.momentum)
+        else:
+            model = models[args.model][0](next(iter(train_loader)), args.lr, args.momentum)
+            if args.weights:
+                try:
+                    model.load_state_dict(torch.load(args.weights), strict=False)
+                    print(f'Model weights {args.weights} loaded')
+                except Exception as e:
+                    print(f'Model weights could not be loaded: {str(e)}')
         print(model)
-
-        if args.weights:
-            try:
-                model.load_state_dict(torch.load(args.weights), strict=False)
-                print(f'Model weights {args.weights} loaded')
-            except Exception as e:
-                print(f'Model weights could not be loaded: {str(e)}')
         
         setattr(model, 'train_dataloader', lambda: train_loader)
         # setattr(model, 'val_dataloader', lambda: test_loader)
@@ -257,7 +273,7 @@ if __name__ == '__main__':
 
         callbacks = [MyDummyCallback(), ModelCheckpoint(dirpath=ckpt_path)]
 
-        trainer = Trainer(accelerator='horovod',
+        trainer = Trainer(accelerator=None,
                         gpus=(1 if (args.cuda and torch.cuda.is_available()) else 0),
                         callbacks=callbacks,
                         max_epochs=epochs,
