@@ -21,8 +21,8 @@ def plot(dir: str):
     
     phi_list = [-180, 180]
     psi_list = [-180, 180]
-    energy_list = [-2, 5]
-    target_energy_list = [-2, 5]
+    energy_list = [0, 9]
+    target_energy_list = [0, 9]
     for i, (energy, target_energy, graph_index) in enumerate(zip(inference['predicted'], inference['target'], inference['test_frames'])):
         graph = graph_samples[graph_index]
         phi = graph[0][0, 0]
