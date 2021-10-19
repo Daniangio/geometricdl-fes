@@ -21,7 +21,7 @@ class GeometricNet(LightningModule):
         lr: float,
         b1: float,
         b2:float,
-        output_dim: int=10,
+        output_dim: int = 20,
         lmax: int = 2,
         layers: int = 10,
         max_radius: float = 6.0,

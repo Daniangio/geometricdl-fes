@@ -12,7 +12,7 @@ class LinearNet(LightningModule):
         self.nodes_features = sample.edge_attr.size(1)
         self.lr = lr
         self.criterion = nn.BCELoss()
-        self.test_criterion_initials = 'bce'
+        self.test_criterion_initials = 'acc'
         self.output_dim = output_dim
         self.hidden_dims = hidden_dims
         linear_layers = []
@@ -62,19 +62,21 @@ class LinearNet(LightningModule):
         return avg_loss
     
     def test_step(self, data, data_idx):
-        batch_predictions, batch_targets = [], []
+        energy_predictions, energy_targets = [], []
         graph_indexes = []
 
         y_hat = self(data)
         loss = torch.mean(torch.abs(y_hat - data.e_label))
         for i in range(y_hat.size(0)):
-            batch_predictions.append(torch.argmax(y_hat[i]))
-            batch_targets.append(torch.argmax(data.e_label[i]))
+            energy_predictions.append(torch.argmax(y_hat[i]))
+            energy_targets.append(torch.argmax(data.e_label[i]))
             graph_indexes.append(data.graph_index[i].item())
+        
+        test_acc = torch.sum(torch.tensor(energy_predictions) == torch.tensor(energy_targets)) / (len(energy_targets) * 1.0)
         return {
-            'test_acc': loss,
+            'test_acc': test_acc,
             'test_loss': loss,
-            'energy_predictions': batch_predictions,
-            'energy_targets': batch_targets,
+            'energy_predictions': energy_predictions,
+            'energy_targets': energy_targets,
             'graph_indexes': graph_indexes
         }
