@@ -1,7 +1,9 @@
 # Custom files and folders
 /venv
 /results
-.vscode/
+/.vscode
+/data
+tmpdir*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

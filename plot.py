@@ -3,13 +3,15 @@ import json
 import os
 import pickle
 import matplotlib.pyplot as plt
+import numpy as np
+import glob
 
 
 DATA_DIR = f"/scratch/carrad/free-energy-gnn/ala_dipep_old"
 N_SAMPLES = 50000
 
-def plot(dir: str):
-    with open(os.path.join(dir, "result.json"), "r") as l:
+def plot(f: str):
+    with open(f, "r") as l:
         inference = json.load(l)
     
     graph_samples = []
@@ -21,8 +23,10 @@ def plot(dir: str):
     
     phi_list = [-180, 180]
     psi_list = [-180, 180]
-    energy_list = [0, 9]
-    target_energy_list = [0, 9]
+    all_e = inference['predicted'] + inference['target']
+    min_e, max_e = min(all_e), max(all_e)
+    energy_list = [min_e, max_e]
+    target_energy_list = [min_e, max_e]
     for i, (energy, target_energy, graph_index) in enumerate(zip(inference['predicted'], inference['target'], inference['test_frames'])):
         graph = graph_samples[graph_index]
         phi = graph[0][0, 0]
@@ -31,17 +35,21 @@ def plot(dir: str):
         psi_list.append(psi)
         energy_list.append(energy)
         target_energy_list.append(target_energy)
+    error_energy_list = list(np.abs(np.array(energy_list) - np.array(target_energy_list)))
+    error_energy_list[:2] = [0, max_e - min_e]
     
-    fig, axs = plt.subplots(2)
+    fig, axs = plt.subplots(3, figsize=(8, 12))
     axs[0].scatter(psi_list, phi_list, s=1, c=energy_list, cmap='turbo')
-    axs[1].scatter(psi_list, phi_list, s=1, c=target_energy_list, cmap='turbo')
-    filename = dir.split("/")
-    filename = filename[-1] if len(filename[-1]) > 0 else filename[-2]
-    fig.savefig(f'{dir}/{filename}.png', dpi=fig.dpi)
+    axs[1].scatter(psi_list, phi_list, s=1, c=error_energy_list, cmap='turbo')
+    axs[2].scatter(psi_list, phi_list, s=1, c=target_energy_list, cmap='turbo')
+    dirname = '/'.join(f.split("/")[:-1])
+    fig.savefig(f'{dirname}/plot.png', dpi=fig.dpi)
+    del fig
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='FES computation of Alanine Dipeptide using Geometric Deep Learning')
-    parser.add_argument('--dir', required=True, help='Directory containing the results to be plotted')
+    parser.add_argument('--dir', required=False, help='Directory containing the results to be plotted')
 
     args = parser.parse_args()
-    plot(args.dir)
+    for f in glob.glob(os.path.join(args.dir, '**/result.json'), recursive=True):
+        plot(f)

@@ -1,21 +1,20 @@
-import argparse
+import os
 import random
 import torch
-import os
 import pickle
 import networkx as nx
 import matplotlib.pyplot as plt
 from torch_geometric.data.data import Data
 from torch_geometric.utils import to_networkx
-
+from biopandas.pdb import PandasPdb
 from dataset import create_transform
 
 
-DATA_DIR = f"/scratch/carrad/free-energy-gnn/ala_dipep_old"
-LABELS_FILE = "/scratch/carrad/free-energy-gnn/free-energy-old.dat"
+DATA_DIR = "data/ala_dipep"
+LABELS_FILE = "data/ala_dipep/phi-psi-free-energy.txt"
 N_SAMPLES = 50000
 
-def visualize2D(G, graph_index, color, epoch=None, loss=None):
+def visualize2D(G, graph_index, color, epoch=None, loss=None, data_dir=None):
     fig = plt.figure(figsize=(7,7))
     plt.xticks([])
     plt.yticks([])
@@ -30,94 +29,70 @@ def visualize2D(G, graph_index, color, epoch=None, loss=None):
                          node_color=color, cmap="Set2")
     
     # plt.show()
-    fig.savefig(f'{graph_index}-2D.png', dpi=fig.dpi)
+    fig.savefig(os.path.join(data_dir, f'{graph_index}-2D.png'), dpi=fig.dpi)
 
-def visualize3D(G, graph_index, edge_weights):
+def visualize3D(d, graph_index, color, edge_weights, data_dir):
     import plotly.graph_objects as go
 
     fig = plt.figure(figsize=(7,7))
     plt.xticks([])
     plt.yticks([])
 
-    # plt.figure(figsize=(5,5))
-    edges = G.edges()
-
-    # ## update to 3d dimension
-    spring_3D = nx.spring_layout(G, dim = 3, k = 0.5) # k regulates the distance between nodes
-    # weights = [G[u][v]['weight'] for u,v in edges]
-    # nx.draw(G, with_labels=True, node_color='skyblue', font_weight='bold',  width=weights, pos=pos)
-
-    # we need to seperate the X,Y,Z coordinates for Plotly
-    # NOTE: spring_3D is a dictionary where the keys are 1,...,6
-    x_nodes= [spring_3D[key][0] for key in spring_3D.keys()] # x-coordinates of nodes
-    y_nodes = [spring_3D[key][1] for key in spring_3D.keys()] # y-coordinates
-    z_nodes = [spring_3D[key][2] for key in spring_3D.keys()] # z-coordinates
-
-    #we need to create lists that contain the starting and ending coordinates of each edge.
-    x_edges=[]
-    y_edges=[]
-    z_edges=[]
 
     #create lists holding midpoints that we will use to anchor text
-    xtp = []
-    ytp = []
-    ztp = []
-
-    #need to fill these with all of the coordinates
-    for edge in edges:
-        #format: [beginning,ending,None]
-        x_coords = [spring_3D[edge[0]][0],spring_3D[edge[1]][0],None]
-        x_edges += x_coords
-        xtp.append(0.5*(spring_3D[edge[0]][0]+ spring_3D[edge[1]][0]))
-
-        y_coords = [spring_3D[edge[0]][1],spring_3D[edge[1]][1],None]
-        y_edges += y_coords
-        ytp.append(0.5*(spring_3D[edge[0]][1]+ spring_3D[edge[1]][1]))
-
-        z_coords = [spring_3D[edge[0]][2],spring_3D[edge[1]][2],None]
-        z_edges += z_coords
-        ztp.append(0.5*(spring_3D[edge[0]][2]+ spring_3D[edge[1]][2]))
+    x_edges = []
+    y_edges = []
+    z_edges = []
     
-    etext = [f'weight={w}' for w in edge_weights]
+    for i in range(d.edge_index.size(1)):
+        x_edges.extend([d.pos[d.edge_index[0][i], 0].item(), d.pos[d.edge_index[1][i], 0].item(), None])
+        y_edges.extend([d.pos[d.edge_index[0][i], 1].item(), d.pos[d.edge_index[1][i], 1].item(), None])
+        z_edges.extend([d.pos[d.edge_index[0][i], 2].item(), d.pos[d.edge_index[1][i], 2].item(), None])
 
-    trace_weights = go.Scatter3d(x=xtp, y=ytp, z=ztp,
-        mode='markers',
-        marker =dict(color='rgb(125,125,125)', size=1), #set the same color as for the edge lines
-        text = etext, hoverinfo='text')
+    # trace_weights = go.Scatter3d(x=xtp, y=ytp, z=ztp,
+    #     mode='markers',
+    #     marker =dict(color='rgb(125,125,125)', size=1), #set the same color as for the edge lines
+    #     text = etext, hoverinfo='text')
 
-    #create a trace for the edges
+    #create a trace for the edges of the graph
     trace_edges = go.Scatter3d(
         x=x_edges,
         y=y_edges,
         z=z_edges,
+        name='graph_edges',
         mode='lines',
         line=dict(color='black', width=2),
         hoverinfo='none')
 
-    #create a trace for the nodes
+    # create a trace for the nodes of the graph, which are atoms and are displayed using their x,y,z coordinates
     trace_nodes = go.Scatter3d(
-        x=x_nodes,
-        y=y_nodes,
-        z=z_nodes,
+        x=d.pos[:, 0],
+        y=d.pos[:, 1],
+        z=d.pos[:, 2],
+        name='atoms',
         mode='markers',
+        text=d.elements,
         marker=dict(symbol='circle',
                 size=10,
-                color='skyblue')
+                color=color)
         )
 
     #Include the traces we want to plot and create a figure
-    data = [trace_edges, trace_nodes, trace_weights]
+    data = [trace_edges, trace_nodes]
     fig = go.Figure(data=data)
     
     # plt.show()
-    fig.write_html(f'{graph_index}-3D.html')
+    fig.write_html(os.path.join(data_dir, f'{graph_index}-3D.html'))
 
-def main():
+def main(data_dir, labels_file):
     graph_index = random.randint(0, N_SAMPLES)
-    with open("{}/{}-graph-df.pickle".format(DATA_DIR, graph_index), "rb") as p:
-        m = {'atoms': pickle.load(p), 'graph_index': graph_index}
-    transform = create_transform(DATA_DIR, LABELS_FILE, use_dihedrals=False)
-    pos, edge_index, node_input, node_attr, edge_attr, label = transform(m)
+    # with open("{}/{}-graph-df.pickle".format(DATA_DIR, graph_index), "rb") as p:
+    #     m = {'atoms': pickle.load(p), 'graph_index': graph_index}
+    ppdb = PandasPdb().read_pdb(os.path.join(data_dir, 'pdb', f'{graph_index}.pdb'))
+    print(ppdb.df['ATOM'])
+    m = {'atoms': ppdb.df['ATOM'], 'graph_index': graph_index}
+    transform = create_transform(data_dir, labels_file, use_dihedrals=False)
+    pos, edge_index, node_input, node_attr, edge_attr, label, elements = transform(m)
     d = Data(
         x=node_input,
         pos=pos,
@@ -125,16 +100,16 @@ def main():
         node_attr=node_attr,
         edge_attr=edge_attr,
         label=label,
+        elements=elements,
         graph_index=graph_index)
     
-    print(d)
     G = to_networkx(d, to_undirected=True)
     mul = torch.tensor([i for i in range(d.x.size(-1))], dtype=torch.float32)
-    visualize2D(G, graph_index=graph_index, color=torch.sum(d.x * mul, dim=1))
+    visualize2D(G, graph_index=graph_index, color=torch.sum(d.x * mul, dim=1), data_dir=os.path.join(data_dir, 'graphs'))
     edge_src, edge_dst = d['edge_index']
     edge_distances = d['pos'][edge_src] - d['pos'][edge_dst]
     edge_weights = edge_distances.norm(dim=1)
-    visualize3D(G, graph_index=graph_index, edge_weights=edge_weights)
+    visualize3D(d, graph_index=graph_index, color=torch.sum(d.x * mul, dim=1), edge_weights=edge_weights, data_dir=os.path.join(data_dir, 'graphs'))
 
 if __name__ == '__main__':
-    main()
+    main(DATA_DIR, LABELS_FILE)
