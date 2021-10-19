@@ -1,5 +1,7 @@
 import json
+import os
 import pickle
+from biopandas.pdb.pandas_pdb import PandasPdb
 import torch
 
 from torch_geometric.data import Data
@@ -24,9 +26,20 @@ def real_number_batch_to_one_hot_vector_bins(real_numbers, bins):
     _, indexes = (real_numbers.view(-1, 1) - bins.view(1, -1)).abs().min(dim=1)
     return indexes_to_one_hot(indexes, n_dims=bins.shape[0])
 
-def create_transform(data_dir, labels_file, use_dihedrals: bool, normalize_labels: bool=True):
+def real_number_to_binned_gaussian(real_numbers, bins):
+    from scipy.stats import norm
+    x = torch.add(torch.zeros_like(real_numbers), bins)
+    p = torch.from_numpy(norm.pdf(x, real_numbers, 0.03))
+    p = torch.div(p, torch.sum(p, dim=1).broadcast_to(p.size()[::-1]).T)
+    p = torch.round(p * 10**3) / (10**3)
+    return p.unsqueeze(1).float()
+
+
+def create_transform(data_dir, labels_file, use_dihedrals: bool, normalize_labels: bool=True, energy_levels: int=20):
     with open(labels_file, "r") as t:
-        labels = torch.as_tensor([[float(v)] for v in t.readlines()])
+        tensor = torch.as_tensor([[float(phi), float(psi), float(f)] for _, phi, psi, f in [x.split() for x in t.readlines()]])
+        phi_psi = tensor[:, :2].unsqueeze(1)
+        labels = tensor[:, 2]
         if normalize_labels:
             # labels_std = torch.std(labels, dim=0)
             # labels_mean = torch.mean(labels, dim=0)
@@ -34,36 +47,71 @@ def create_transform(data_dir, labels_file, use_dihedrals: bool, normalize_label
             labels = labels.view(labels.size(0), -1)
             labels -= labels.min(0, keepdim=True)[0]
             labels /= labels.max(0, keepdim=True)[0]
-            labels = real_number_batch_to_one_hot_vector_bins(labels, torch.linspace(0.0, 1.0, steps=10))
-    return functools.partial(prepare_transform, data_dir=data_dir, use_dihedrals=use_dihedrals, labels=labels)
+            # labels = real_number_batch_to_one_hot_vector_bins(labels, torch.linspace(0.0, 1.0, steps=10))
+            labels = real_number_to_binned_gaussian(labels, torch.linspace(0.0, 1.0, steps=energy_levels))
+    return functools.partial(prepare_transform, data_dir=data_dir, use_dihedrals=use_dihedrals, phi_psi=phi_psi, labels=labels)
 
 
-def prepare_transform(item, data_dir: str, use_dihedrals: bool, labels: torch.Tensor=None):
+def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.Tensor, labels: torch.Tensor):
     # t = time.time()
-    label = labels[item['graph_index']] if labels is not None else None
-
+    d_label = phi_psi[item['graph_index']]
+    e_label = labels[item['graph_index']]
     if use_dihedrals:
         with open(f'{data_dir}/{item["graph_index"]}-dihedrals-graph.pickle', "rb") as p:
             debruijn = pickle.load(p)
         debruijn_edge_attr, debruijn_edge_index, _ = debruijn
         node_embedding = torch.eye(len(debruijn_edge_attr))
         debruijn_node_input = node_embedding # torch.cat([debruijn_node_input, node_embedding], dim=1)
-        debruijn_edge_attr = expand_edge_attr(debruijn_edge_attr, debruijn_edge_index)
-        return None, debruijn_edge_index, debruijn_node_input, None, debruijn_edge_attr, label
-    element_mapping = {
-        'C': 0,
-        'O': 1,
-        'N': 2,
-        'H': 3,
-        'CX': 4,
-        'HC': 5,
-        'CT': 6,
-        'H1': 7
+        #debruijn_edge_attr = expand_edge_attr(debruijn_edge_attr, debruijn_edge_index)
+        return None, debruijn_edge_index, debruijn_node_input, None, debruijn_edge_attr, d_label, e_label, None
+    element_mapping = { # Mapping che non differenzia gli stessi atomi che hanno bond diversi
+        'HH31': 0,
+        'HH32': 0,
+        'HH33': 0,
+        'HB1': 0,
+        'HB2': 0,
+        'HB3': 0,
+        'CH3': 1,
+        'C': 1,
+        'O': 2,
+        'N': 3,
+        'H': 0,
+        'CA': 1,
+        'HA': 0,
+        'CB': 1
     }
+    # element_mapping = { # Mapping che considera diversi gli atomi piu importanti in base ai loro bond
+    #     'HH31': 0,
+    #     'HH32': 0,
+    #     'HH33': 0,
+    #     'HB1': 0,
+    #     'HB2': 0,
+    #     'HB3': 0,
+    #     'CH3': 1,
+    #     'C': 2,
+    #     'O': 3,
+    #     'N': 4,
+    #     'H': 5,
+    #     'CA': 6,
+    #     'HA': 7,
+    #     'CB': 8
+    # }
+    # element_mapping = {
+    #     'C': 0,
+    #     'O': 1,
+    #     'N': 2,
+    #     'H': 3,
+    #     'CX': 4,
+    #     'HC': 5,
+    #     'CT': 6,
+    #     'H1': 7
+    # }
     if type(item['atoms']) != pd.DataFrame:
         item['atoms'] = pd.DataFrame(**item['atoms'])
-    coords = item['atoms'][['x', 'y', 'z']].values
-    elements = item['atoms']['type'].values
+    coords = item['atoms'][['x_coord', 'y_coord', 'z_coord']].values
+    elements = item['atoms']['atom_name'].values
+    # coords = item['atoms'][['x', 'y', 'z']].values
+    # elements = item['atoms']['type'].values
     
     filter = np.array([i for i, e in enumerate(elements) if e in element_mapping])
     coords = coords[filter]
@@ -78,7 +126,7 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, labels: torch.Te
 
     # Build edges
     max_radius = 10.0
-    edge_index = radius_graph(pos, max_radius, max_num_neighbors=10)
+    edge_index = radius_graph(pos, max_radius, max_num_neighbors=elements.size)
 
     # apply random rotation
     # pos = torch.einsum('zij,zaj->zai', o3.rand_matrix(len(pos)), pos)
@@ -87,7 +135,7 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, labels: torch.Te
     edge_attr = torch.ones(edge_index.shape[1], 1, dtype=torch.float32)
 
     # print(time.time() - t)
-    return pos, edge_index, node_input, node_attr, edge_attr, label
+    return pos, edge_index, node_input, node_attr, edge_attr, d_label, e_label, elements
 
 
 def expand_edge_attr(attr, graph):
@@ -118,28 +166,35 @@ def make_graph_directed(graph):
 
 
 class Dataset(BaseDataset):
-    def __init__(self, data_dir, indexes, transform):
-        self.data_dir = data_dir
+    def __init__(self, data_dir, indexes, transform, use_dihedrals):
+        self.data_dir = os.path.join(data_dir, 'pdb') if not use_dihedrals else data_dir
         self.indexes = indexes
         self.transform = transform
+        self.use_dihedrals = use_dihedrals
 
-    def __getitem__(self, i): 
-        try:
-            with open("{}/{}-graph-df.pickle".format(self.data_dir, self.indexes[i]), "rb") as p:
-                m = {'atoms': pickle.load(p), 'graph_index': self.indexes[i]}
-        except FileNotFoundError:
-            with open("{}/{}.json".format(self.data_dir, self.indexes[i]), "r") as f:
-                raw = json.load(f)
-            df = pd.DataFrame(raw['atoms'])
-            df.to_pickle("{}/{}-graph-df.pickle".format(self.data_dir, self.indexes[i]))
-            m = {'atoms': df, 'graph_index': self.indexes[i]}
-        pos, edge_index, node_input, node_attr, edge_attr, label = self.transform(m)
+    def __getitem__(self, i):
+        if self.use_dihedrals:
+            try:
+                with open("{}/{}-graph-df.pickle".format(self.data_dir, self.indexes[i]), "rb") as p:
+                    m = {'atoms': pickle.load(p), 'graph_index': self.indexes[i]}
+            except FileNotFoundError:
+                with open("{}/{}.json".format(self.data_dir, self.indexes[i]), "r") as f:
+                    raw = json.load(f)
+                df = pd.DataFrame(raw['atoms'])
+                df.to_pickle("{}/{}-graph-df.pickle".format(self.data_dir, self.indexes[i]))
+                m = {'atoms': df, 'graph_index': self.indexes[i]}
+        else:
+            ppdb = PandasPdb().read_pdb(os.path.join(self.data_dir, f'{self.indexes[i]}.pdb'))
+            m = {'atoms': ppdb.df['ATOM'], 'graph_index': self.indexes[i]}
+        pos, edge_index, node_input, node_attr, edge_attr, d_label, e_label, elements = self.transform(m)
         d = Data(x=node_input,
                  pos=pos,
                  edge_index=edge_index,
                  node_attr=node_attr,
                  edge_attr=edge_attr,
-                 label=label,
+                 d_label=d_label,
+                 e_label=e_label,
+                 elements=elements,
                  graph_index=self.indexes[i])
         return d
 

@@ -23,11 +23,11 @@ def plot(f: str):
     
     phi_list = [-180, 180]
     psi_list = [-180, 180]
-    all_e = inference['predicted'] + inference['target']
+    all_e = inference['energy_predicted'] + inference['energy_target']
     min_e, max_e = min(all_e), max(all_e)
     energy_list = [min_e, max_e]
     target_energy_list = [min_e, max_e]
-    for i, (energy, target_energy, graph_index) in enumerate(zip(inference['predicted'], inference['target'], inference['test_frames'])):
+    for i, (energy, target_energy, graph_index) in enumerate(zip(inference['energy_predicted'], inference['energy_target'], inference['test_frames'])):
         graph = graph_samples[graph_index]
         phi = graph[0][0, 0]
         psi = graph[0][1, 0]

@@ -19,7 +19,8 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 import horovod.torch as hvd
-from models.geometric import GeometricNet, ConvNetwork, OLDGeometricNet
+from models.geometric import GeometricNet
+from models.geometricphipsi import GeometricPhiPsiNet
 
 from models.linear import LinearNet
 from models.graphdihedrals import BISGraphConvPoolNet, GraphConvPoolNet
@@ -27,6 +28,8 @@ from dataset import Dataset, create_transform
 
 from torch_geometric.loader import DataLoader
 from ray.tune.integration.pytorch_lightning import TuneReportCallback
+
+from plot import plot
 
 # Training settings
 parser = argparse.ArgumentParser(description='FES computation of Alanine Dipeptide using Geometric Deep Learning')
@@ -38,8 +41,6 @@ parser.add_argument('--epochs', type=int, default=10, metavar='N',
                     help='number of epochs to train (default: 10)')
 parser.add_argument('--lr', type=float, default=1e-3, metavar='LR',
                     help='learning rate (default: 1e-3)')
-parser.add_argument('--momentum', type=float, default=0.8, metavar='M',
-                    help='SGD momentum (default: 0.8)')
 parser.add_argument('--no-cuda', action='store_true', default=False,
                     help='disables CUDA training')
 parser.add_argument('--seed', type=Union[int, None], default=None, metavar='S',
@@ -52,9 +53,9 @@ parser.add_argument('--use-adasum', action='store_true', default=False,
                     help='use adasum algorithm to do reduction')
 parser.add_argument('--gradient-predivide-factor', type=float, default=1.0,
                     help='apply gradient predivide factor in optimizer (default: 1.0)')
-parser.add_argument('--data-dir', default='/scratch/carrad/free-energy-gnn/ala_dipep_old',
+parser.add_argument('--data-dir', default='data/ala_dipep',
                     help='location of the training dataset in the local filesystem')
-parser.add_argument('--labels-file', default='/scratch/carrad/free-energy-gnn/free-energy-old.dat',
+parser.add_argument('--labels-file', default='data/ala_dipep/phi-psi-free-energy.txt',
                     help='file containing the energy values associated with each frame')
 parser.add_argument('--weights', default=None,
                     help='file containing the model weights to be loaded before training')
@@ -70,22 +71,22 @@ def metric_average(val, name):
     return avg_tensor.item()
 
 def gather(val, name):
-    tensor = torch.tensor(val)
+    tensor = torch.Tensor(val)
     gathered_tensor = hvd.allgather(tensor, name=name)
-    return gathered_tensor.tolist()
+    return gathered_tensor
 
 def load_indexes(data_dir, test_on, n_samples=50000):
     print('loading indexes')
-    with open(f'{data_dir}/left.json', 'r') as l:
+    with open(os.path.join(data_dir, 'left.json'), 'r') as l:
         left = json.load(l)
         random.shuffle(left)
 
-    with open(f"{data_dir}/right.json", "r") as r:
+    with open(os.path.join(data_dir, 'right.json'), 'r') as r:
         right = json.load(r)
         random.shuffle(right)
 
     if test_on == 'all_but_left':
-        train_ind = left[::2] # take 50% of left area as training
+        train_ind = left[::3] # take 33% of left area as training
         remaining_ind = [i for i in range(n_samples) if i not in left]
         random.shuffle(remaining_ind)
     elif test_on == 'all_but_right':
@@ -119,16 +120,21 @@ def test(model: LightningModule, test_loader, test_sampler):
     model = model.cuda()
     model.eval()
     test_loss = 0.
-    predictions, targets = [], []
+    energy_predictions, energy_targets, dihedrals_predictions, dihedrals_targets = [], [], [], []
+    graph_indexes = []
     with torch.no_grad():
         for idx, data in enumerate(test_loader):
             if args.cuda:
                 data = data.cuda()
             # run inference and sum up batch loss
-            loss, batch_predictions, batch_targets = model.test_step(data, idx)
-            test_loss += loss
-            predictions.extend(batch_predictions)
-            targets.extend(batch_targets)
+            results = model.test_step(data, idx)
+            test_loss += results.get('test_loss')
+            graph_indexes.extend(results.get('graph_indexes'))
+            energy_predictions.extend(results.get('energy_predictions'))
+            energy_targets.extend(results.get('energy_targets'))
+            if results.get('dihedrals_predictions') is not None:
+                dihedrals_predictions.extend(results.get('dihedrals_predictions'))
+                dihedrals_targets.extend(results.get('dihedrals_targets'))
             
 
         # Horovod: use test_sampler to determine the number of examples in
@@ -137,42 +143,61 @@ def test(model: LightningModule, test_loader, test_sampler):
 
         # Horovod: average metric values across workers.
         test_loss = metric_average(test_loss, 'avg_loss')
-        predictions = gather(predictions, 'all_predictions')
-        targets = gather(targets, 'all_targets')
+        energy_predictions = gather(energy_predictions, 'all_energy_predictions')
+        energy_targets = gather(energy_targets, 'all_energy_targets')
+        dihedrals_predictions = gather(dihedrals_predictions, 'all_dihedrals_predictions')
+        dihedrals_targets = gather(dihedrals_targets, 'all_dihedrals_targets')
 
         # Horovod: print output only on first rank.
         if hvd.rank() == 0:
             print(f'\nTest set: Average loss: {test_loss}\n')
-        
-        return test_loss, predictions, targets
+
+        return {
+            'test_acc': test_loss,
+            'test_loss': test_loss,
+            'dihedrals_predictions': dihedrals_predictions,
+            'dihedrals_targets': dihedrals_targets,
+            'energy_predictions': energy_predictions,
+            'energy_targets': energy_targets,
+            'graph_indexes': graph_indexes
+        }
 
 
-def save_results(model, train_indexes, test_indexes, test_loss, predictions, targets, test_on, args):
-    directory = f"results/{test_on}/{model.name}-old-{datetime.now().strftime('%m%d-%H%M')}-{model.test_criterion_initials}:{test_loss:.2f}"
-    sorted_predictions = [pred[0] for pred in sorted(predictions, key=lambda x: x[1])]
-    sorted_targets = [target for target in sorted(targets, key=lambda x: x[1])]
-    test_frames = [int(frame[1]) for frame in sorted_targets]
-    sorted_targets = [target[0] for target in sorted_targets]
-
-
-    os.makedirs(directory)
-    with open(f"{directory}/result.json", "w") as f:
-        json.dump({
+def save_results(model, train_indexes, test_indexes, test_results: dict, test_on, args):
+    directory = f"results/{test_on}/{model.name}-{datetime.now().strftime('%m%d-%H%M')}-{model.test_criterion_initials}:{test_results.get('test_acc'):.2f}"
+    print(directory)
+    graph_indexes = [int(idx) for idx in test_results.get('graph_indexes')]
+    sorted_energy_predictions = [int(x.item()) for _, x in sorted(zip(graph_indexes, test_results.get('energy_predictions')))]
+    sorted_energy_targets = [int(x.item()) for _, x in sorted(zip(graph_indexes, test_results.get('energy_targets')))]
+    result = {
             "train_parameters": {
                 "batch-size": args.batch_size,
                 "epochs": args.epochs,
                 "lr": args.lr,
-                "momentum": args.momentum,
                 "seed": args.seed
             },
-            "test_loss": test_loss,
-            "predicted": sorted_predictions,
-            "target": sorted_targets,
-            "test_frames": test_frames,
+            "test_accuracy": test_results.get('test_acc'),
+            "test_loss": test_results.get('test_loss'),
+            "energy_predicted": sorted_energy_predictions,
+            "energy_target": sorted_energy_targets,
+            "test_frames": sorted(graph_indexes),
             "train_frames": train_indexes,
-        }, f)
+        }
+    
+    if test_results.get('dihedrals_predictions') is not None:
+        sorted_dihedrals_predictions = [x.cpu().tolist() for _, x in sorted(zip(graph_indexes, test_results.get('dihedrals_predictions')))]
+        sorted_dihedrals_targets = [x.cpu().tolist() for _, x in sorted(zip(graph_indexes, test_results.get('dihedrals_targets')))]
+        result.update({
+            "dihedrals_predicted": sorted_dihedrals_predictions,
+            "dihedrals_target": sorted_dihedrals_targets
+        })
+
+    os.makedirs(directory)
+    with open(f"{directory}/result.json", "w") as f:
+        json.dump(result, f)
 
     torch.save(model.state_dict(), f"{directory}/parameters.pt")
+    plot(f"{directory}/result.json")
 
 
 if __name__ == '__main__':
@@ -193,7 +218,8 @@ if __name__ == '__main__':
     models = {
         'linear': (LinearNet, True), # Model, use_dihedrals
         'graph': (GraphConvPoolNet, True),
-        'geometric': (ConvNetwork, False)
+        'geometric': (GeometricNet, False),
+        'geometricphipsi': (GeometricPhiPsiNet, False)
     }
 
     # get data
@@ -205,8 +231,8 @@ if __name__ == '__main__':
             train_indexes, validation_indexes, test_indexes = load_indexes(data_dir, test_on)
 
             transform = create_transform(data_dir, labels_file, use_dihedrals=models[args.model][1])
-            train_dataset = Dataset(data_dir=data_dir, indexes=train_indexes, transform=transform)
-            test_dataset = Dataset(data_dir=data_dir, indexes=test_indexes, transform=transform)
+            train_dataset = Dataset(data_dir=data_dir, indexes=train_indexes, transform=transform, use_dihedrals=models[args.model][1])
+            test_dataset = Dataset(data_dir=data_dir, indexes=test_indexes, transform=transform, use_dihedrals=models[args.model][1])
 
         # set train data loader
         train_sampler = DistributedSampler(train_dataset, num_replicas=hvd.size(), rank=hvd.rank())
@@ -236,9 +262,9 @@ if __name__ == '__main__':
         if args.checkpoint:
             assert not args.weights, 'Params --weights and --checkpoint are mutually exclusive'
             print(f'Loading model from checkpoint: {args.checkpoint}')
-            model = models[args.model][0].load_from_checkpoint(checkpoint_path=args.checkpoint, sample=next(iter(train_loader)), lr=args.lr, momentum=args.momentum)
+            model = models[args.model][0].load_from_checkpoint(checkpoint_path=args.checkpoint, sample=next(iter(train_loader)), lr=args.lr)
         else:
-            model = models[args.model][0](next(iter(train_loader)), args.lr, args.momentum)
+            model = models[args.model][0](next(iter(train_loader)), args.lr)
             if args.weights:
                 try:
                     model.load_state_dict(torch.load(args.weights), strict=False)
@@ -284,7 +310,7 @@ if __name__ == '__main__':
 
         trainer.fit(model)
 
-        test_loss, predictions, targets = test(model, test_loader, test_sampler)
+        test_results = test(model, test_loader, test_sampler)
         if hvd.rank() == 0:
-            save_results(model, train_indexes, test_indexes, test_loss, predictions, targets, test_on, args)
-        shutil.rmtree(run_output_dir, ignore_errors=True)
+            save_results(model, train_indexes, test_indexes, test_results, test_on, args)
+        #shutil.rmtree(run_output_dir, ignore_errors=True)

@@ -2,17 +2,17 @@ import torch
 import torch.nn as nn
 from pytorch_lightning import LightningModule
 import torch.optim
+import torch.nn.functional as F
 
 class LinearNet(LightningModule):
-    def __init__(self, sample, lr, momentum, output_dim: int=1, hidden_dims: list=[256, 1024, 128, 64]):
+    def __init__(self, sample, lr, output_dim: int=20, hidden_dims: list=[256, 1024, 128, 64]):
         super(LinearNet, self).__init__()
         self.name = 'linear'
-        self.nodes = sample.edge_attr.size(0) // sample.label.size(0)
+        self.nodes = sample.num_nodes // sample.e_label.size(0)
         self.nodes_features = sample.edge_attr.size(1)
         self.lr = lr
-        self.momentum = momentum
-        self.criterion = nn.SmoothL1Loss(beta=1.0)
-        self.test_criterion_initials = 'mae'
+        self.criterion = nn.BCELoss()
+        self.test_criterion_initials = 'bce'
         self.output_dim = output_dim
         self.hidden_dims = hidden_dims
         linear_layers = []
@@ -34,24 +34,25 @@ class LinearNet(LightningModule):
 
     def forward(self, data):
         x = data.edge_attr
-        x = x.view(len(data.label), -1)
+        x = x.view(len(data.e_label), -1)
         for l in self.linears:
             x = l(x)
 
-        return self.output(x)
+        return F.softmax(self.output(x), dim=1)
     
     def configure_optimizers(self):
-        return torch.optim.SGD(self.parameters(), lr=self.lr, momentum=self.momentum)
+        return torch.optim.SGD(self.parameters(), lr=self.lr, momentum=0.8)
     
     def training_step(self, data, data_idx):
         y_hat = self(data)
-        loss = self.criterion(y_hat.squeeze(), data.label)
+        print(y_hat.squeeze(), data.e_label)
+        loss = self.criterion(y_hat.squeeze(), data.e_label)
         self.log('train_loss', loss)
         return loss
 
     def validation_step(self, data, data_idx):
         y_hat = self(data)
-        loss = self.criterion(y_hat.squeeze(), data.label)
+        loss = self.criterion(y_hat.squeeze(), data.e_label)
         self.log('val_loss', loss)
         return loss
 
@@ -62,10 +63,18 @@ class LinearNet(LightningModule):
     
     def test_step(self, data, data_idx):
         batch_predictions, batch_targets = [], []
+        graph_indexes = []
 
         y_hat = self(data)
-        loss = torch.mean(torch.abs(y_hat - data.label))
-        for pr, trg in zip(range(y_hat.size(0)), range(data.label.size(0))):
-            batch_predictions.append((y_hat[pr].item(), data.graph_index[pr]))
-            batch_targets.append((data.label[trg].item(), data.graph_index[pr]))
-        return loss, batch_predictions, batch_targets
+        loss = torch.mean(torch.abs(y_hat - data.e_label))
+        for i in range(y_hat.size(0)):
+            batch_predictions.append(torch.argmax(y_hat[i]))
+            batch_targets.append(torch.argmax(data.e_label[i]))
+            graph_indexes.append(data.graph_index[i].item())
+        return {
+            'test_acc': loss,
+            'test_loss': loss,
+            'energy_predictions': batch_predictions,
+            'energy_targets': batch_targets,
+            'graph_indexes': graph_indexes
+        }
