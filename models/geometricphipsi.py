@@ -191,7 +191,7 @@ class GeometricPhiPsiNet(LightningModule):
         self.test_criterion_initials = 'acc'
         self.num_nodes = sample.num_nodes
 
-        irreps_node_attr = o3.Irreps('0e')
+        irreps_node_attr = o3.Irreps(f'{sample.node_attr.size(1)}x0e')
         irreps_edge_attr = o3.Irreps('0e') + o3.Irreps.spherical_harmonics(lmax)
         irreps_embed_out = o3.Irreps(f'{mul}x0e+{mul}x0o+{mul//4}x1o+{mul//8}x2o')
         

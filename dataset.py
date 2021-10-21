@@ -1,3 +1,4 @@
+import ast
 import json
 import os
 import pickle
@@ -35,8 +36,24 @@ def real_number_to_binned_gaussian(real_numbers, bins):
     return p.unsqueeze(1).float()
 
 
-def create_transform(data_dir, labels_file, use_dihedrals: bool, normalize_labels: bool=True, energy_levels: int=20):
-    with open(labels_file, "r") as t:
+def create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals: bool, normalize_labels: bool=True, energy_levels: int=20):
+    # Retrieve atom bonds
+    df = pd.read_csv(os.path.join(data_dir, bonds_file), header=0, quotechar='"', converters={'bonds':ast.literal_eval})
+    src_atoms = df['index'].values
+    trg_atoms = df['bonds'].values
+
+    bonds = []
+    for src_atom in src_atoms:
+        for trg_atom in trg_atoms[src_atom-1]:
+            bonds.append([src_atom-1, trg_atom-1])
+    bonds = torch.Tensor(bonds).int().T
+
+    # Retrieve amot partial charges
+    partial_charges = pd.read_csv(os.path.join(data_dir, partial_charges_file), header=0)
+    partial_charges = torch.Tensor(partial_charges.charge.values)
+
+    # Retrieve labels
+    with open(os.path.join(data_dir, labels_file), "r") as t:
         tensor = torch.as_tensor([[float(phi), float(psi), float(f)] for _, phi, psi, f in [x.split() for x in t.readlines()]])
         phi_psi = tensor[:, :2].unsqueeze(1)
         labels = tensor[:, 2]
@@ -49,10 +66,10 @@ def create_transform(data_dir, labels_file, use_dihedrals: bool, normalize_label
             labels /= labels.max(0, keepdim=True)[0]
             # labels = real_number_batch_to_one_hot_vector_bins(labels, torch.linspace(0.0, 1.0, steps=10))
             labels = real_number_to_binned_gaussian(labels, torch.linspace(0.0, 1.0, steps=energy_levels))
-    return functools.partial(prepare_transform, data_dir=data_dir, use_dihedrals=use_dihedrals, phi_psi=phi_psi, labels=labels)
+    return functools.partial(prepare_transform, data_dir=data_dir, use_dihedrals=use_dihedrals, phi_psi=phi_psi, bonds=bonds, partial_charges=partial_charges, labels=labels)
 
 
-def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.Tensor, labels: torch.Tensor):
+def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.Tensor, bonds: torch.Tensor, partial_charges:torch.Tensor, labels: torch.Tensor):
     # t = time.time()
     d_label = phi_psi[item['graph_index']]
     e_label = labels[item['graph_index']]
@@ -63,7 +80,7 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.T
         node_embedding = torch.eye(len(debruijn_edge_attr))
         debruijn_node_input = node_embedding # torch.cat([debruijn_node_input, node_embedding], dim=1)
         #debruijn_edge_attr = expand_edge_attr(debruijn_edge_attr, debruijn_edge_index)
-        return None, debruijn_edge_index, debruijn_node_input, None, debruijn_edge_attr, d_label, e_label, None
+        return None, debruijn_edge_index, debruijn_node_input, None, debruijn_edge_attr, bonds, d_label, e_label, None
     element_mapping = { # Mapping che non differenzia gli stessi atomi che hanno bond diversi
         'HH31': 0,
         'HH32': 0,
@@ -119,9 +136,10 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.T
 
     # Make one-hot
     elements_int = np.array([element_mapping[e] for e in elements])
-    one_hot = np.zeros((elements.size, len(element_mapping)))
-    one_hot[np.arange(elements.size), elements_int] = 1
+    one_hot = np.zeros((elements.size, max(element_mapping.values()) + 1))
+    one_hot[np.arange(elements.size), elements_int] = partial_charges
 
+    # Atom coordinates
     pos = torch.tensor(coords, dtype=torch.float32)
 
     # Build edges
@@ -130,12 +148,12 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.T
 
     # apply random rotation
     # pos = torch.einsum('zij,zaj->zai', o3.rand_matrix(len(pos)), pos)
-    node_input = torch.tensor(one_hot, dtype=torch.float32)
-    node_attr = torch.ones(len(one_hot), 1, dtype=torch.float32)
+    node_input = torch.ones(len(one_hot), 1, dtype=torch.float32)
+    node_attr = torch.tensor(one_hot, dtype=torch.float32)
     edge_attr = torch.ones(edge_index.shape[1], 1, dtype=torch.float32)
 
     # print(time.time() - t)
-    return pos, edge_index, node_input, node_attr, edge_attr, d_label, e_label, elements
+    return pos, edge_index, node_input, node_attr, edge_attr, bonds, d_label, e_label, elements
 
 
 def expand_edge_attr(attr, graph):
@@ -186,12 +204,13 @@ class Dataset(BaseDataset):
         else:
             ppdb = PandasPdb().read_pdb(os.path.join(self.data_dir, f'{self.indexes[i]}.pdb'))
             m = {'atoms': ppdb.df['ATOM'], 'graph_index': self.indexes[i]}
-        pos, edge_index, node_input, node_attr, edge_attr, d_label, e_label, elements = self.transform(m)
+        pos, edge_index, node_input, node_attr, edge_attr, bonds, d_label, e_label, elements = self.transform(m)
         d = Data(x=node_input,
                  pos=pos,
                  edge_index=edge_index,
                  node_attr=node_attr,
                  edge_attr=edge_attr,
+                 bonds=bonds,
                  d_label=d_label,
                  e_label=e_label,
                  elements=elements,

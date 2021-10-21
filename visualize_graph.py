@@ -11,7 +11,9 @@ from dataset import create_transform
 
 
 DATA_DIR = "data/ala_dipep"
-LABELS_FILE = "data/ala_dipep/phi-psi-free-energy.txt"
+LABELS_FILE = "phi-psi-free-energy.txt"
+BONDS_FILE = "ala_dipep_bonds.csv"
+PARTIAL_CHARGES_FILE = "ala_dipep_partial_charges.csv"
 N_SAMPLES = 50000
 
 def visualize2D(G, graph_index, color, epoch=None, loss=None, data_dir=None):
@@ -38,8 +40,15 @@ def visualize3D(d, graph_index, color, edge_weights, data_dir):
     plt.xticks([])
     plt.yticks([])
 
+    x_bonds = []
+    y_bonds = []
+    z_bonds = []
+    
+    for i in range(d.bonds.size(1)):
+        x_bonds.extend([d.pos[d.bonds[0][i], 0].item(), d.pos[d.bonds[1][i], 0].item(), None])
+        y_bonds.extend([d.pos[d.bonds[0][i], 1].item(), d.pos[d.bonds[1][i], 1].item(), None])
+        z_bonds.extend([d.pos[d.bonds[0][i], 2].item(), d.pos[d.bonds[1][i], 2].item(), None])
 
-    #create lists holding midpoints that we will use to anchor text
     x_edges = []
     y_edges = []
     z_edges = []
@@ -49,12 +58,17 @@ def visualize3D(d, graph_index, color, edge_weights, data_dir):
         y_edges.extend([d.pos[d.edge_index[0][i], 1].item(), d.pos[d.edge_index[1][i], 1].item(), None])
         z_edges.extend([d.pos[d.edge_index[0][i], 2].item(), d.pos[d.edge_index[1][i], 2].item(), None])
 
-    # trace_weights = go.Scatter3d(x=xtp, y=ytp, z=ztp,
-    #     mode='markers',
-    #     marker =dict(color='rgb(125,125,125)', size=1), #set the same color as for the edge lines
-    #     text = etext, hoverinfo='text')
+    # create a trace for the edges of the graph
+    trace_bonds = go.Scatter3d(
+        x=x_bonds,
+        y=y_bonds,
+        z=z_bonds,
+        name='bonds',
+        mode='lines',
+        line=dict(color='red', width=6),
+        hoverinfo='none')
 
-    #create a trace for the edges of the graph
+    # create a trace for the edges of the graph
     trace_edges = go.Scatter3d(
         x=x_edges,
         y=y_edges,
@@ -78,38 +92,40 @@ def visualize3D(d, graph_index, color, edge_weights, data_dir):
         )
 
     #Include the traces we want to plot and create a figure
-    data = [trace_edges, trace_nodes]
+    data = [trace_edges, trace_nodes, trace_bonds]
     fig = go.Figure(data=data)
     
     # plt.show()
     fig.write_html(os.path.join(data_dir, f'{graph_index}-3D.html'))
 
-def main(data_dir, labels_file):
-    graph_index = random.randint(0, N_SAMPLES)
+def main(data_dir, labels_file, bonds_file, partial_charges_file, graph_index):
     # with open("{}/{}-graph-df.pickle".format(DATA_DIR, graph_index), "rb") as p:
     #     m = {'atoms': pickle.load(p), 'graph_index': graph_index}
     ppdb = PandasPdb().read_pdb(os.path.join(data_dir, 'pdb', f'{graph_index}.pdb'))
-    print(ppdb.df['ATOM'])
+    # print(ppdb.df['ATOM'])
     m = {'atoms': ppdb.df['ATOM'], 'graph_index': graph_index}
-    transform = create_transform(data_dir, labels_file, use_dihedrals=False)
-    pos, edge_index, node_input, node_attr, edge_attr, label, elements = transform(m)
+    transform = create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals=False)
+    pos, edge_index, node_input, node_attr, edge_attr, bonds, d_label, e_label, elements = transform(m)
     d = Data(
         x=node_input,
         pos=pos,
         edge_index=edge_index,
         node_attr=node_attr,
         edge_attr=edge_attr,
-        label=label,
+        bonds=bonds,
+        label=e_label,
         elements=elements,
         graph_index=graph_index)
     
     G = to_networkx(d, to_undirected=True)
-    mul = torch.tensor([i for i in range(d.x.size(-1))], dtype=torch.float32)
+    mul = torch.tensor([i for i in range(d.node_attr.size(-1))], dtype=torch.float32)
     visualize2D(G, graph_index=graph_index, color=torch.sum(d.x * mul, dim=1), data_dir=os.path.join(data_dir, 'graphs'))
     edge_src, edge_dst = d['edge_index']
     edge_distances = d['pos'][edge_src] - d['pos'][edge_dst]
     edge_weights = edge_distances.norm(dim=1)
-    visualize3D(d, graph_index=graph_index, color=torch.sum(d.x * mul, dim=1), edge_weights=edge_weights, data_dir=os.path.join(data_dir, 'graphs'))
+    visualize3D(d, graph_index=graph_index, color=torch.sum((d.node_attr != 0) * mul, dim=1), edge_weights=edge_weights, data_dir=os.path.join(data_dir, 'graphs'))
 
 if __name__ == '__main__':
-    main(DATA_DIR, LABELS_FILE)
+    for _ in range(1):
+        graph_index = 0# random.randint(0, N_SAMPLES)
+        main(DATA_DIR, LABELS_FILE, BONDS_FILE, PARTIAL_CHARGES_FILE, graph_index)

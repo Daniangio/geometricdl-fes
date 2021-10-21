@@ -23,11 +23,12 @@ def plot(f: str):
     
     phi_list = [-180, 180]
     psi_list = [-180, 180]
-    all_e = inference['energy_predicted'] + inference['energy_target']
+    pred, target = inference.get('energy_predicted', inference.get('predicted')), inference.get('energy_target', inference.get('target'))
+    all_e = pred + target
     min_e, max_e = min(all_e), max(all_e)
     energy_list = [min_e, max_e]
     target_energy_list = [min_e, max_e]
-    for i, (energy, target_energy, graph_index) in enumerate(zip(inference['energy_predicted'], inference['energy_target'], inference['test_frames'])):
+    for i, (energy, target_energy, graph_index) in enumerate(zip(pred, target, inference['test_frames'])):
         graph = graph_samples[graph_index]
         phi = graph[0][0, 0]
         psi = graph[0][1, 0]
@@ -40,7 +41,7 @@ def plot(f: str):
     
     fig, axs = plt.subplots(3, figsize=(8, 12))
     axs[0].scatter(psi_list, phi_list, s=1, c=energy_list, cmap='turbo')
-    axs[1].scatter(psi_list, phi_list, s=1, c=error_energy_list, cmap='turbo')
+    axs[1].scatter(psi_list, phi_list, s=1, c=error_energy_list, cmap='hot_r')
     axs[2].scatter(psi_list, phi_list, s=1, c=target_energy_list, cmap='turbo')
     dirname = '/'.join(f.split("/")[:-1])
     fig.savefig(f'{dirname}/plot.png', dpi=fig.dpi)

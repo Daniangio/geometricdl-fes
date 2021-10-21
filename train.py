@@ -47,16 +47,14 @@ parser.add_argument('--seed', type=Union[int, None], default=None, metavar='S',
                     help='use manual seed (default: Do not use)')
 parser.add_argument('--log-interval', type=int, default=5, metavar='N',
                     help='how many batches to wait before logging training status')
-parser.add_argument('--fp16-allreduce', action='store_true', default=False,
-                    help='use fp16 compression during allreduce')
-parser.add_argument('--use-adasum', action='store_true', default=False,
-                    help='use adasum algorithm to do reduction')
-parser.add_argument('--gradient-predivide-factor', type=float, default=1.0,
-                    help='apply gradient predivide factor in optimizer (default: 1.0)')
 parser.add_argument('--data-dir', default='data/ala_dipep',
                     help='location of the training dataset in the local filesystem')
-parser.add_argument('--labels-file', default='data/ala_dipep/phi-psi-free-energy.txt',
+parser.add_argument('--labels-file', default='phi-psi-free-energy.txt',
                     help='file containing the energy values associated with each frame')
+parser.add_argument('--bonds-file', default='ala_dipep_bonds.csv',
+                    help='file containing the bonds between each pair of atoms of the molecule')
+parser.add_argument('--partial-charges-file', default='ala_dipep_partial_charges.csv',
+                    help='file containing the partial charges of each atom of the molecule')
 parser.add_argument('--weights', default=None,
                     help='file containing the model weights to be loaded before training')
 parser.add_argument('--checkpoint', default=None,
@@ -119,7 +117,7 @@ def load_indexes(data_dir, test_on, n_samples=50000):
 def test(model: LightningModule, test_loader, test_sampler):
     model = model.cuda()
     model.eval()
-    test_loss = 0.
+    test_loss, test_acc = 0., 0.
     energy_predictions, energy_targets, dihedrals_predictions, dihedrals_targets = [], [], [], []
     graph_indexes = []
     with torch.no_grad():
@@ -129,6 +127,7 @@ def test(model: LightningModule, test_loader, test_sampler):
             # run inference and sum up batch loss
             results = model.test_step(data, idx)
             test_loss += results.get('test_loss')
+            test_acc += results.get('test_acc')
             graph_indexes.extend(results.get('graph_indexes'))
             energy_predictions.extend(results.get('energy_predictions'))
             energy_targets.extend(results.get('energy_targets'))
@@ -139,9 +138,11 @@ def test(model: LightningModule, test_loader, test_sampler):
 
         # Horovod: use test_sampler to determine the number of examples in
         # this worker's partition.
-        test_loss /= len(test_sampler)
+        test_acc  /= len(test_loader)
+        test_loss /= len(test_loader)
 
         # Horovod: average metric values across workers.
+        test_acc = metric_average(test_acc, 'avg_acc')
         test_loss = metric_average(test_loss, 'avg_loss')
         energy_predictions = gather(energy_predictions, 'all_energy_predictions')
         energy_targets = gather(energy_targets, 'all_energy_targets')
@@ -153,7 +154,7 @@ def test(model: LightningModule, test_loader, test_sampler):
             print(f'\nTest set: Average loss: {test_loss}\n')
 
         return {
-            'test_acc': test_loss,
+            'test_acc': test_acc,
             'test_loss': test_loss,
             'dihedrals_predictions': dihedrals_predictions,
             'dihedrals_targets': dihedrals_targets,
@@ -225,12 +226,14 @@ if __name__ == '__main__':
     # get data
     data_dir = args.data_dir
     labels_file = args.labels_file
+    bonds_file = args.bonds_file
+    partial_charges_file = args.partial_charges_file
 
     for test_on in args.test_on:
         with FileLock(os.path.expanduser("~/.horovod_lock")):
             train_indexes, validation_indexes, test_indexes = load_indexes(data_dir, test_on)
 
-            transform = create_transform(data_dir, labels_file, use_dihedrals=models[args.model][1])
+            transform = create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals=models[args.model][1])
             train_dataset = Dataset(data_dir=data_dir, indexes=train_indexes, transform=transform, use_dihedrals=models[args.model][1])
             test_dataset = Dataset(data_dir=data_dir, indexes=test_indexes, transform=transform, use_dihedrals=models[args.model][1])
 
@@ -271,7 +274,6 @@ if __name__ == '__main__':
                     print(f'Model weights {args.weights} loaded')
                 except Exception as e:
                     print(f'Model weights could not be loaded: {str(e)}')
-        print(model)
         
         setattr(model, 'train_dataloader', lambda: train_loader)
         # setattr(model, 'val_dataloader', lambda: test_loader)
