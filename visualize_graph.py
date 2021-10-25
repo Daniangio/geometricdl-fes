@@ -127,5 +127,5 @@ def main(data_dir, labels_file, bonds_file, partial_charges_file, graph_index):
 
 if __name__ == '__main__':
     for _ in range(1):
-        graph_index = 0# random.randint(0, N_SAMPLES)
+        graph_index = 0 # random.randint(0, N_SAMPLES)
         main(DATA_DIR, LABELS_FILE, BONDS_FILE, PARTIAL_CHARGES_FILE, graph_index)

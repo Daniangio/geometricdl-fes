@@ -137,7 +137,8 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.T
     # Make one-hot
     elements_int = np.array([element_mapping[e] for e in elements])
     one_hot = np.zeros((elements.size, max(element_mapping.values()) + 1))
-    one_hot[np.arange(elements.size), elements_int] = partial_charges
+    one_hot[np.arange(elements.size), elements_int] = 1
+    node_input = torch.tensor(one_hot, dtype=torch.float32)
 
     # Atom coordinates
     pos = torch.tensor(coords, dtype=torch.float32)
@@ -148,7 +149,7 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.T
 
     # apply random rotation
     # pos = torch.einsum('zij,zaj->zai', o3.rand_matrix(len(pos)), pos)
-    node_input = torch.ones(len(one_hot), 1, dtype=torch.float32)
+    one_hot[np.arange(elements.size), elements_int] = partial_charges
     node_attr = torch.tensor(one_hot, dtype=torch.float32)
     edge_attr = torch.ones(edge_index.shape[1], 1, dtype=torch.float32)
 
