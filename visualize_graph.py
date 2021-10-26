@@ -1,13 +1,19 @@
+import argparse
 import os
-import random
 import torch
-import pickle
+import numpy as np
 import networkx as nx
 import matplotlib.pyplot as plt
 from torch_geometric.data.data import Data
 from torch_geometric.utils import to_networkx
 from biopandas.pdb import PandasPdb
 from dataset import create_transform
+from models.geometric import GeometricNet
+from models.geometricphipsi import GeometricPhiPsiNet
+from dataset import Dataset, create_transform
+from torch_geometric.loader import DataLoader
+
+from train import load_indexes
 
 
 DATA_DIR = "data/ala_dipep"
@@ -68,6 +74,10 @@ def visualize3D(d, graph_index, color, edge_weights, data_dir):
         line=dict(color='red', width=6),
         hoverinfo='none')
 
+    edge_src = d.edge_index[0]
+    edge_dst = d.edge_index[1]
+    edge_vec = d.pos[edge_src] - d.pos[edge_dst]
+    edge_length = edge_vec.norm(dim=1)
     # create a trace for the edges of the graph
     trace_edges = go.Scatter3d(
         x=x_edges,
@@ -93,19 +103,19 @@ def visualize3D(d, graph_index, color, edge_weights, data_dir):
 
     #Include the traces we want to plot and create a figure
     data = [trace_edges, trace_nodes, trace_bonds]
-    fig = go.Figure(data=data)
+    fig = go.Figure(data=data, layout=go.Layout(title=f'Phi: {d.dihedrals[0, 0].item() / np.pi * 180} - Psi: {d.dihedrals[0, 1].item() / np.pi * 180}'))
     
     # plt.show()
-    fig.write_html(os.path.join(data_dir, f'{graph_index}-3D.html'))
+    fig.write_html(os.path.join(data_dir, f'{torch.argmax(d.e_label, dim=1).item()}-{graph_index}-3D.html'))
 
-def main(data_dir, labels_file, bonds_file, partial_charges_file, graph_index):
+def visualize_from_pdb(data_dir, labels_file, bonds_file, partial_charges_file, graph_index):
     # with open("{}/{}-graph-df.pickle".format(DATA_DIR, graph_index), "rb") as p:
     #     m = {'atoms': pickle.load(p), 'graph_index': graph_index}
     ppdb = PandasPdb().read_pdb(os.path.join(data_dir, 'pdb', f'{graph_index}.pdb'))
     # print(ppdb.df['ATOM'])
     m = {'atoms': ppdb.df['ATOM'], 'graph_index': graph_index}
     transform = create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals=False)
-    pos, edge_index, node_input, node_attr, edge_attr, bonds, d_label, e_label, elements = transform(m)
+    pos, edge_index, node_input, node_attr, edge_attr, bonds, dihedrals, e_label, elements = transform(m)
     d = Data(
         x=node_input,
         pos=pos,
@@ -113,19 +123,48 @@ def main(data_dir, labels_file, bonds_file, partial_charges_file, graph_index):
         node_attr=node_attr,
         edge_attr=edge_attr,
         bonds=bonds,
-        label=e_label,
+        e_label=e_label,
+        dihedrals=dihedrals,
         elements=elements,
-        graph_index=graph_index)
+        graph_index=[graph_index])
     
+    visualize(data_dir, graph_index, d)
+    return d
+
+def visualize(data_dir, graph_index, d):
     G = to_networkx(d, to_undirected=True)
     mul = torch.tensor([i for i in range(d.node_attr.size(-1))], dtype=torch.float32)
-    visualize2D(G, graph_index=graph_index, color=torch.sum(d.x * mul, dim=1), data_dir=os.path.join(data_dir, 'graphs'))
+    # visualize2D(G, graph_index=graph_index, color=torch.sum(d.x * mul, dim=1), data_dir=os.path.join(data_dir, 'graphs'))
     edge_src, edge_dst = d['edge_index']
     edge_distances = d['pos'][edge_src] - d['pos'][edge_dst]
     edge_weights = edge_distances.norm(dim=1)
     visualize3D(d, graph_index=graph_index, color=torch.sum((d.node_attr != 0) * mul, dim=1), edge_weights=edge_weights, data_dir=os.path.join(data_dir, 'graphs'))
 
 if __name__ == '__main__':
-    for _ in range(1):
-        graph_index = 0 # random.randint(0, N_SAMPLES)
-        main(DATA_DIR, LABELS_FILE, BONDS_FILE, PARTIAL_CHARGES_FILE, graph_index)
+    parser = argparse.ArgumentParser(description='Plot the 2D graph of the molecule, with atoms as nodes and atom distances as edges. Plot also the 3D structure of the molecule')
+    parser.add_argument('--graph', default=0, help='Index of the graph to be plotted. Default is 0')
+    parser.add_argument('--weights', default=None, help='file containing the model weights to be loaded before to run inference, build and visualize a graph')
+    parser.add_argument('--model', default='geometric', help='Name of the model to use')
+
+    models = {
+        'geometric': GeometricNet,
+        'geometricphipsi': GeometricPhiPsiNet
+    }
+
+    args = parser.parse_args()
+    data = visualize_from_pdb(DATA_DIR, LABELS_FILE, BONDS_FILE, PARTIAL_CHARGES_FILE, int(args.graph))
+    
+    if args.weights:
+        model = models[args.model](data, 0)
+        try:
+            model.load_state_dict(torch.load(args.weights), strict=True)
+            print(f'Model weights {args.weights} loaded')
+        except Exception as e:
+            print(f'Model weights could not be loaded: {str(e)}')
+    
+        model = model.cuda()
+        model.eval()
+        with torch.no_grad():
+            data = data.cuda()
+            results = model.test_step(data, int(args.graph))
+            visualize(DATA_DIR, graph_index=f'G{args.graph}', d=results['new_molecule'].cpu())

@@ -80,6 +80,7 @@ class Embedding(nn.Module):
             basis='cosine',  # the cosine basis with cutoff = True goes to zero at max_radius
             cutoff=True,  # no need for an additional smooth cutoff
         ).mul(self.number_of_basis**0.5)
+
         embed = self.embed(data['x'])
         embed = self.mp1(embed, data['node_attr'], edge_src, edge_dst, edge_attr, edge_length_embedding)
         return embed, data['node_attr'], edge_src, edge_dst, edge_attr, edge_length_embedding, batch
@@ -178,7 +179,7 @@ class GeometricNet(LightningModule):
 
         self.name = 'geometric'
         self.test_criterion_initials = 'acc'
-        self.num_nodes = sample.num_nodes
+        self.num_nodes = sample.num_nodes / len(sample.e_label) * 64
 
         irreps_node_attr = o3.Irreps(f'{sample.node_attr.size(1)}x0e')
         irreps_edge_attr = o3.Irreps('0e') + o3.Irreps.spherical_harmonics(lmax)
@@ -194,7 +195,7 @@ class GeometricNet(LightningModule):
             mpn_layers=mpn_layers,
             max_radius=max_radius,
             number_of_basis=number_of_basis,
-            num_neighbors=sample.num_nodes
+            num_neighbors=self.num_nodes
         )
 
         self.energy_predictor = EnergyPredictor(
@@ -206,7 +207,7 @@ class GeometricNet(LightningModule):
             mul=mul,
             mpn_layers=mpn_layers,
             number_of_basis=number_of_basis,
-            num_neighbors=sample.num_nodes
+            num_neighbors=self.num_nodes
         )
 
         atoms_fec_irreps = self.energy_predictor.irreps_mp_output
@@ -218,7 +219,7 @@ class GeometricNet(LightningModule):
             mul=mul,
             mpn_layers=mpn_layers,
             number_of_basis=number_of_basis,
-            num_neighbors=sample.num_nodes
+            num_neighbors=self.num_nodes
         )
 
     def forward(self, data: Union[Data, Dict[str, torch.Tensor]]) -> torch.Tensor:

@@ -30,8 +30,8 @@ def plot(f: str):
     target_energy_list = [min_e, max_e]
     for i, (energy, target_energy, graph_index) in enumerate(zip(pred, target, inference['test_frames'])):
         graph = graph_samples[graph_index]
-        phi = graph[0][0, 0]
-        psi = graph[0][1, 0]
+        phi = graph[0][1, 0]
+        psi = graph[0][0, 0]
         phi_list.append(phi)
         psi_list.append(psi)
         energy_list.append(energy)
@@ -40,9 +40,9 @@ def plot(f: str):
     error_energy_list[:2] = [0, max_e - min_e]
     
     fig, axs = plt.subplots(3, figsize=(8, 12))
-    axs[0].scatter(psi_list, phi_list, s=1, c=energy_list, cmap='turbo')
-    axs[1].scatter(psi_list, phi_list, s=1, c=error_energy_list, cmap='hot_r')
-    axs[2].scatter(psi_list, phi_list, s=1, c=target_energy_list, cmap='turbo')
+    axs[0].scatter(phi_list, psi_list, s=1, c=energy_list, cmap='turbo')
+    axs[1].scatter(phi_list, psi_list, s=1, c=error_energy_list, cmap='hot_r')
+    axs[2].scatter(phi_list, psi_list, s=1, c=target_energy_list, cmap='turbo')
     dirname = '/'.join(f.split("/")[:-1])
     fig.savefig(f'{dirname}/plot.png', dpi=fig.dpi)
     del fig

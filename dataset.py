@@ -71,7 +71,7 @@ def create_transform(data_dir, labels_file, bonds_file, partial_charges_file, us
 
 def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.Tensor, bonds: torch.Tensor, partial_charges:torch.Tensor, labels: torch.Tensor):
     # t = time.time()
-    d_label = phi_psi[item['graph_index']]
+    dihedrals = phi_psi[item['graph_index']]
     e_label = labels[item['graph_index']]
     if use_dihedrals:
         with open(f'{data_dir}/{item["graph_index"]}-dihedrals-graph.pickle', "rb") as p:
@@ -80,7 +80,7 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.T
         node_embedding = torch.eye(len(debruijn_edge_attr))
         debruijn_node_input = node_embedding # torch.cat([debruijn_node_input, node_embedding], dim=1)
         #debruijn_edge_attr = expand_edge_attr(debruijn_edge_attr, debruijn_edge_index)
-        return None, debruijn_edge_index, debruijn_node_input, None, debruijn_edge_attr, bonds, d_label, e_label, None
+        return None, debruijn_edge_index, debruijn_node_input, None, debruijn_edge_attr, bonds, dihedrals, e_label, None
     element_mapping = { # Mapping che non differenzia gli stessi atomi che hanno bond diversi
         'HH31': 0,
         'HH32': 0,
@@ -154,7 +154,7 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.T
     edge_attr = torch.ones(edge_index.shape[1], 1, dtype=torch.float32)
 
     # print(time.time() - t)
-    return pos, edge_index, node_input, node_attr, edge_attr, bonds, d_label, e_label, elements
+    return pos, edge_index, node_input, node_attr, edge_attr, bonds, dihedrals, e_label, elements
 
 
 def expand_edge_attr(attr, graph):
@@ -205,14 +205,14 @@ class Dataset(BaseDataset):
         else:
             ppdb = PandasPdb().read_pdb(os.path.join(self.data_dir, f'{self.indexes[i]}.pdb'))
             m = {'atoms': ppdb.df['ATOM'], 'graph_index': self.indexes[i]}
-        pos, edge_index, node_input, node_attr, edge_attr, bonds, d_label, e_label, elements = self.transform(m)
+        pos, edge_index, node_input, node_attr, edge_attr, bonds, dihedrals, e_label, elements = self.transform(m)
         d = Data(x=node_input,
                  pos=pos,
                  edge_index=edge_index,
                  node_attr=node_attr,
                  edge_attr=edge_attr,
                  bonds=bonds,
-                 d_label=d_label,
+                 dihedrals=dihedrals,
                  e_label=e_label,
                  elements=elements,
                  graph_index=self.indexes[i])

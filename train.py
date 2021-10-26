@@ -61,7 +61,7 @@ parser.add_argument('--checkpoint', default=None,
                     help='path to the checkpoint file of a training that did not finish')
 parser.add_argument('--test-on', nargs='+', help='<Required> Portion of the FES where to test inference, train on all the remaining FES.' +
                     '\nPossible values: left, right, all_but_left, all_but_right', required=True)
-parser.add_argument('--model', default='graph', help='Name of the model to use')
+parser.add_argument('--model', default='geometric', help='Name of the model to use')
 
 
 def metric_average(val, name):
