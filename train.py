@@ -19,11 +19,12 @@ from pytorch_lightning import Trainer
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 import horovod.torch as hvd
+from torch_geometric.data.data import Data
 from models.geometric import GeometricNet
 from models.geometricphipsi import GeometricPhiPsiNet
 
 from models.linear import LinearNet
-from models.graphdihedrals import BISGraphConvPoolNet, GraphConvPoolNet
+from models.graphdihedrals import GraphConvPoolNet
 from dataset import Dataset, create_transform
 
 from torch_geometric.loader import DataLoader
@@ -62,6 +63,7 @@ parser.add_argument('--checkpoint', default=None,
 parser.add_argument('--test-on', nargs='+', help='<Required> Portion of the FES where to test inference, train on all the remaining FES.' +
                     '\nPossible values: left, right, all_but_left, all_but_right', required=True)
 parser.add_argument('--model', default='geometric', help='Name of the model to use')
+parser.add_argument('--n-samples', default=30000, help='Number of frames')
 
 
 def metric_average(val, name):
@@ -115,6 +117,7 @@ def load_indexes(data_dir, test_on, n_samples=50000):
 
 
 def test(model: LightningModule, test_loader, test_sampler):
+    print('Testing model')
     model = model.cuda()
     model.eval()
     test_loss, test_acc = 0., 0.
@@ -123,7 +126,11 @@ def test(model: LightningModule, test_loader, test_sampler):
     with torch.no_grad():
         for idx, data in enumerate(test_loader):
             if args.cuda:
-                data = data.cuda()
+                if isinstance(data, list):
+                    for d in data:
+                        d = d.cuda()
+                elif isinstance(data, Data):
+                    data = data.cuda()
             # run inference and sum up batch loss
             results = model.test_step(data, idx)
             test_loss += results.get('test_loss')
@@ -198,7 +205,7 @@ def save_results(model, train_indexes, test_indexes, test_results: dict, test_on
         json.dump(result, f)
 
     torch.save(model.state_dict(), f"{directory}/parameters.pt")
-    plot(f"{directory}/result.json")
+    plot(directory, data_dir=args.data_dir, labels_file=args.labels_file)
 
 
 if __name__ == '__main__':
@@ -231,7 +238,7 @@ if __name__ == '__main__':
 
     for test_on in args.test_on:
         with FileLock(os.path.expanduser("~/.horovod_lock")):
-            train_indexes, validation_indexes, test_indexes = load_indexes(data_dir, test_on)
+            train_indexes, validation_indexes, test_indexes = load_indexes(data_dir, test_on, n_samples=int(args.n_samples))
 
             transform = create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals=models[args.model][1])
             train_dataset = Dataset(data_dir=data_dir, indexes=train_indexes, transform=transform, use_dihedrals=models[args.model][1])
@@ -265,15 +272,18 @@ if __name__ == '__main__':
         if args.checkpoint:
             assert not args.weights, 'Params --weights and --checkpoint are mutually exclusive'
             print(f'Loading model from checkpoint: {args.checkpoint}')
-            model = models[args.model][0].load_from_checkpoint(checkpoint_path=args.checkpoint, sample=next(iter(train_loader)), lr=args.lr)
+            model = models[args.model][0].load_from_checkpoint(strict=False, checkpoint_path=args.checkpoint, sample=next(iter(train_loader)), lr=args.lr)
         else:
             model = models[args.model][0](next(iter(train_loader)), args.lr)
             if args.weights:
+                print(f'Loading model weights  {args.weights}')
                 try:
                     model.load_state_dict(torch.load(args.weights), strict=False)
                     print(f'Model weights {args.weights} loaded')
                 except Exception as e:
                     print(f'Model weights could not be loaded: {str(e)}')
+            else:
+                print('Initializing new model')
         
         setattr(model, 'train_dataloader', lambda: train_loader)
         # setattr(model, 'val_dataloader', lambda: test_loader)
