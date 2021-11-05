@@ -5,7 +5,7 @@ import numpy as np
 FILE = 'data/ala_dipep/phi-psi-free-energy.txt'
 
 with open(FILE, "r") as t:
-    tensor = torch.as_tensor([[float(phi), float(psi), float(f)] for _, phi, psi, f in [x.split() for x in t.readlines()]])
+    tensor = torch.as_tensor([[float(phi), float(psi), float(f)] for _, phi, psi, f in [x.split() for index, x in enumerate(t.readlines()) if index < 10000]])
     phi_t = tensor[:, 0]
     psi_t = tensor[:, 1]
 

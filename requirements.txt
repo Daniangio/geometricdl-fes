@@ -1,6 +1,8 @@
 biopandas>=0.2.9
+biopython~=1.79
 e3nn~=0.4.0
 filelock~=3.1.0
 matplotlib>=3.4.3
 plotly>=5.3.1
 pytorch-lightning~=1.4.8
+segmentation-models-pytorch~=0.2.0
