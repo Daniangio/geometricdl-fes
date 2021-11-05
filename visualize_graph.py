@@ -10,10 +10,7 @@ from biopandas.pdb import PandasPdb
 from dataset import create_transform
 from models.geometric import GeometricNet
 from models.geometricphipsi import GeometricPhiPsiNet
-from dataset import Dataset, create_transform
-from torch_geometric.loader import DataLoader
-
-from train import load_indexes
+from dataset import create_transform
 
 
 DATA_DIR = "data/ala_dipep"
@@ -63,8 +60,17 @@ def visualize3D(d, graph_index, color, edge_weights, data_dir):
         x_edges.extend([d.pos[d.edge_index[0][i], 0].item(), d.pos[d.edge_index[1][i], 0].item(), None])
         y_edges.extend([d.pos[d.edge_index[0][i], 1].item(), d.pos[d.edge_index[1][i], 1].item(), None])
         z_edges.extend([d.pos[d.edge_index[0][i], 2].item(), d.pos[d.edge_index[1][i], 2].item(), None])
+    
+    x_forces = []
+    y_forces = []
+    z_forces = []
+    
+    for i in range(d.x.size(0)):
+        x_forces.extend([d.pos[i, 0].item(), d.pos[i, 0].item() + d.forces[i, 0].item()/10.0, None])
+        y_forces.extend([d.pos[i, 1].item(), d.pos[i, 1].item() + d.forces[i, 1].item()/10.0, None])
+        z_forces.extend([d.pos[i, 2].item(), d.pos[i, 2].item() + d.forces[i, 2].item()/10.0, None])
 
-    # create a trace for the edges of the graph
+    # create a trace for the bonds of the graph
     trace_bonds = go.Scatter3d(
         x=x_bonds,
         y=y_bonds,
@@ -87,6 +93,16 @@ def visualize3D(d, graph_index, color, edge_weights, data_dir):
         mode='lines',
         line=dict(color='black', width=2),
         hoverinfo='none')
+    
+    # create a trace for the forces on aoms
+    trace_forces = go.Scatter3d(
+        x=x_forces,
+        y=y_forces,
+        z=z_forces,
+        name='forces',
+        mode='lines',
+        line=dict(color='brown', width=2),
+        hoverinfo='none')
 
     # create a trace for the nodes of the graph, which are atoms and are displayed using their x,y,z coordinates
     trace_nodes = go.Scatter3d(
@@ -102,7 +118,7 @@ def visualize3D(d, graph_index, color, edge_weights, data_dir):
         )
 
     #Include the traces we want to plot and create a figure
-    data = [trace_edges, trace_nodes, trace_bonds]
+    data = [trace_edges, trace_nodes, trace_bonds, trace_forces]
     fig = go.Figure(data=data, layout=go.Layout(title=f'Phi: {d.dihedrals[0, 0].item() / np.pi * 180} - Psi: {d.dihedrals[0, 1].item() / np.pi * 180}'))
     
     # plt.show()
@@ -115,7 +131,7 @@ def visualize_from_pdb(data_dir, labels_file, bonds_file, partial_charges_file, 
     # print(ppdb.df['ATOM'])
     m = {'atoms': ppdb.df['ATOM'], 'graph_index': graph_index}
     transform = create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals=False)
-    pos, edge_index, node_input, node_attr, edge_attr, bonds, dihedrals, e_label, elements = transform(m)
+    pos, edge_index, node_input, node_attr, edge_attr, bonds, bonds_attr, dihedrals, forces, e_label, elements = transform(m)
     d = Data(
         x=node_input,
         pos=pos,
@@ -123,6 +139,8 @@ def visualize_from_pdb(data_dir, labels_file, bonds_file, partial_charges_file, 
         node_attr=node_attr,
         edge_attr=edge_attr,
         bonds=bonds,
+        bonds_attr=bonds_attr,
+        forces=forces,
         e_label=e_label,
         dihedrals=dihedrals,
         elements=elements,
@@ -133,12 +151,16 @@ def visualize_from_pdb(data_dir, labels_file, bonds_file, partial_charges_file, 
 
 def visualize(data_dir, graph_index, d):
     G = to_networkx(d, to_undirected=True)
-    mul = torch.tensor([i for i in range(d.node_attr.size(-1))], dtype=torch.float32)
+    mul = torch.tensor([i for i in range(4)], dtype=torch.float32)
     # visualize2D(G, graph_index=graph_index, color=torch.sum(d.x * mul, dim=1), data_dir=os.path.join(data_dir, 'graphs'))
     edge_src, edge_dst = d['edge_index']
     edge_distances = d['pos'][edge_src] - d['pos'][edge_dst]
     edge_weights = edge_distances.norm(dim=1)
-    visualize3D(d, graph_index=graph_index, color=torch.sum((d.node_attr != 0) * mul, dim=1), edge_weights=edge_weights, data_dir=os.path.join(data_dir, 'graphs'))
+    visualize3D(d, graph_index=graph_index, color=torch.sum((d.x[:, :4] != 0) * mul, dim=1), edge_weights=edge_weights, data_dir=os.path.join(data_dir, 'graphs'))
+
+'''
+Creates an html file that shows the 3D structure of a molecule in an interactive way
+'''
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Plot the 2D graph of the molecule, with atoms as nodes and atom distances as edges. Plot also the 3D structure of the molecule')

@@ -3,6 +3,7 @@
 /results
 /.vscode
 /data
+/extra
 tmpdir*
 
 # Byte-compiled / optimized / DLL files
