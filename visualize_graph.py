@@ -10,7 +10,6 @@ from biopandas.pdb import PandasPdb
 from dataset import create_transform
 from models.geometric import GeometricNet
 from models.geometricphipsi import GeometricPhiPsiNet
-from dataset import create_transform
 
 
 DATA_DIR = "data/ala_dipep"

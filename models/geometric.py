@@ -104,7 +104,7 @@ class EnergyPredictor(nn.Module):
         irreps_node_input: o3.Irreps,
         irreps_node_attr: o3.Irreps,
         irreps_edge_attr: o3.Irreps,
-        energy_levels: int,
+        irreps_node_out: o3.Irreps,
         lmax: int,
         mul: int,
         mpn_layers: int,
@@ -118,7 +118,6 @@ class EnergyPredictor(nn.Module):
             for l in range(lmax + 1)
             for p in [-1, 1]
         ])
-        irreps_node_out = o3.Irreps([(energy_levels, (0, 1))])
 
         self.mp_edges = MessagePassing(
             irreps_node_sequence=[irreps_node_input] + mpn_layers * [irreps_node_hidden_edges] + [irreps_node_hidden_edges],
@@ -142,9 +141,7 @@ class EnergyPredictor(nn.Module):
     def forward(self, embed_on_edges, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch) -> torch.Tensor:
         x = self.mp_edges(embed_on_edges, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding)
         atoms_fec = self.mp_final(x, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding)
-        x = scatter(atoms_fec, batch, dim=0)
-        print('x', x)
-        return F.gumbel_softmax(x, tau=100, dim=1), atoms_fec
+        return scatter(atoms_fec, batch, dim=0), atoms_fec
 
 
 class Generator(nn.Module):
@@ -213,8 +210,9 @@ class GeometricNet(LightningModule):
         irreps_node_attr = o3.Irreps(f'{data_edges.node_attr.size(1)}x0e')
         irreps_edge_attr = o3.Irreps('0e') + o3.Irreps.spherical_harmonics(lmax)
         irreps_embed_out = o3.Irreps(f'{mul//2}x0e+{mul//2}x0o+{mul//4}x1e+{mul//4}x1o+{mul//8}x2e+{mul//8}x2o')
+        irreps_node_out = o3.Irreps(f'{mul//2}x0e+{mul//2}x0o')
 
-        self.fc = FullyConnectedNet([data_edges.x.size(1), mul, mul], F.gelu) if use_forces else None
+        self.fc = None if use_forces else FullyConnectedNet([data_edges.x.size(1), mul, mul], F.gelu)
         
         self.embedding = Embedding(
             irreps_node_input=irreps_node_input,
@@ -234,7 +232,7 @@ class GeometricNet(LightningModule):
             irreps_node_input=self.embedding.irreps_node_out,
             irreps_node_attr=irreps_node_attr,
             irreps_edge_attr=irreps_edge_attr,
-            energy_levels=energy_levels,
+            irreps_node_out=irreps_node_out,
             lmax=lmax,
             mul=mul,
             mpn_layers=mpn_layers,
@@ -253,19 +251,26 @@ class GeometricNet(LightningModule):
         #     number_of_basis=number_of_basis,
         #     num_neighbors=self.num_nodes
         # )
+        self.lin1 = torch.nn.Linear(mul // 2 * 2, 4*mul)
+        self.lin2 = torch.nn.Linear(4*mul, 4*mul)
+        self.out = torch.nn.Linear(4*mul, energy_levels)
 
     def forward(self, data_edges: Union[Data, Dict[str, torch.Tensor]], data_bonds: Union[Data, Dict[str, torch.Tensor]]) -> torch.Tensor:
-        if self.use_forces:
+        if not self.use_forces:
             data_edges['x'] = self.fc(data_edges['x'])
         embed_on_edges, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch = self.embedding(data_edges, data_bonds)
         free_energy, atoms_fec = self.energy_predictor(embed_on_edges, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch)
         # edge_attr = torch.ones_like(edge_attr)
         # edge_length_embedding = torch.ones_like(edge_length_embedding)
         # new_pos = self.generator(atoms_fec, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch)
-        return free_energy, None # new_pos
+        free_energy = F.gelu(self.lin1(free_energy))
+        free_energy = F.gelu(self.lin2(free_energy))
+        free_energy = self.out(free_energy)
+        return F.gumbel_softmax(free_energy, tau=1, dim=1), None # new_pos
     
     def free_energy_loss(self, y_hat, y):
-        return self.fe_loss(y_hat, y)
+        # return self.fe_loss(y_hat, y)
+        return F.mse_loss(y_hat, y)
     
     def autoencoder_loss(self, y_hat, y):
         return F.mse_loss(y_hat, y)
@@ -275,17 +280,15 @@ class GeometricNet(LightningModule):
         b1 = self.hparams.b1
         b2 = self.hparams.b2
 
-        opt_e = torch.optim.Adam(list(self.embedding.parameters()) + list(self.energy_predictor.parameters()), lr=lr, betas=(b1, b2))
+        opt_e = torch.optim.Adam(self.parameters(), lr=lr, betas=(b1, b2))
         # opt_g = torch.optim.Adam(list(self.embedding.parameters()) + list(self.generator.parameters()), lr=lr, betas=(b1, b2))
         return [opt_e], []
     
     def training_step(self, data, data_idx): # optimizer_idx <- add param if train with multiple optimizers
         data_edges, data_bonds = data
-        embed_on_edges, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch = self.embedding(data_edges, data_bonds)
         # train energy predictor
         # if optimizer_idx == 0: <- use if multiple optimizers
-        y_hat, atoms_fec = self.energy_predictor(embed_on_edges, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch)
-        print('fe', y_hat)
+        y_hat, atoms_fec = self(data_edges, data_bonds)
         e_loss = self.free_energy_loss(y_hat.squeeze(-1), data_edges.e_label)
         tqdm_dict = {"e_loss": e_loss.item()}
         self.log_dict(tqdm_dict)

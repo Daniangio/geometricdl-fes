@@ -10,6 +10,7 @@ import shutil
 from pathlib import Path
 import random
 from pytorch_lightning.core.lightning import LightningModule
+from tqdm import tqdm
 
 import torch
 import torch.multiprocessing as mp
@@ -124,7 +125,7 @@ def test(model: LightningModule, test_loader, test_sampler):
     energy_predictions, energy_targets, dihedrals_predictions, dihedrals_targets = [], [], [], []
     graph_indexes = []
     with torch.no_grad():
-        for idx, data in enumerate(test_loader):
+        for idx, data in tqdm(enumerate(test_loader)):
             if args.cuda:
                 if isinstance(data, list):
                     for d in data:
