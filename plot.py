@@ -5,13 +5,12 @@ import pickle
 import matplotlib.pyplot as plt
 import numpy as np
 import glob
-
 import torch
 
 
 DATA_DIR = 'data/ala_dipep'
 LABELS_FILE = 'phi-psi-free-energy.txt'
-N_SAMPLES = 30000
+LABELS_FILE_MD = 'phi-psi-free-energy-approx.txt'
 
 def plot(dir: str, data_dir: str, labels_file: str):
     with open(os.path.join(data_dir, labels_file), "r") as t:
@@ -47,9 +46,39 @@ def plot(dir: str, data_dir: str, labels_file: str):
         fig.savefig(f'{dirname}/plot.png', dpi=fig.dpi)
         del fig
 
+
+def plot_from_md(data_dir: str, labels_file: str):
+    with open(os.path.join(data_dir, labels_file), "r") as t:
+        labels = torch.Tensor([[float(phi), float(psi), float(fe)] for _, phi, psi, fe in [x.split() for x in t.readlines()]])
+        labels = labels[labels[:, -1] > 0]
+        labels[:, :-1] = labels[:, :-1] / np.pi * 180
+        # labels[:, -1] = labels[:, -1] / torch.sum(labels[:, -1])
+        # K = 1
+        # labels[:, -1] = -torch.log(labels[:, -1]) * K
+
+    phi_list = []
+    psi_list = []
+    energy_list = []
+    for i in range(len(labels)):
+        phi = labels[i, 0]
+        psi = labels[i, 1]
+        phi_list.append(phi)
+        psi_list.append(psi)
+        energy_list.append(labels[i, 2])
+    
+    fig, axs = plt.subplots(1, figsize=(8, 12))
+    plt.scatter(phi_list, psi_list, s=1, c=energy_list, cmap='turbo', label=energy_list)
+    plt.colorbar()
+    fig.savefig(f'approx-plot.png', dpi=fig.dpi)
+    del fig
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='FES computation of Alanine Dipeptide using Geometric Deep Learning')
     parser.add_argument('--dir', required=False, help='Directory containing the results to be plotted')
 
     args = parser.parse_args()
-    plot(args.dir, data_dir=DATA_DIR, labels_file=LABELS_FILE)
+    if args.dir is None:
+        plot_from_md( data_dir=DATA_DIR, labels_file=LABELS_FILE_MD)
+    else:
+        plot(args.dir, data_dir=DATA_DIR, labels_file=LABELS_FILE)

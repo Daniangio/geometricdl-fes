@@ -55,20 +55,20 @@ class Embedding(nn.Module):
         )
         self.irreps_node_out = self.mp1.irreps_node_output
     
-    def forward(self, data: Union[Data, Dict[str, torch.Tensor]]) -> torch.Tensor:
-        if 'batch' in data:
-            batch = data['batch']
+    def forward(self, data_edges: Union[Data, Dict[str, torch.Tensor]], data_bonds: Union[Data, Dict[str, torch.Tensor]]) -> torch.Tensor:
+        if 'batch' in data_edges:
+            batch = data_edges['batch']
         else:
-            batch = data['pos'].new_zeros(data['pos'].shape[0], dtype=torch.long)
+            batch = data_edges['pos'].new_zeros(data_edges['pos'].shape[0], dtype=torch.long)
 
         # The graph
-        edge_src = data['edge_index'][0]
-        edge_dst = data['edge_index'][1]
+        edge_src = data_edges['edge_index'][0]
+        edge_dst = data_edges['edge_index'][1]
 
         # Edge attributes
-        edge_vec = data['pos'][edge_src] - data['pos'][edge_dst]
+        edge_vec = data_edges['pos'][edge_src] - data_edges['pos'][edge_dst]
         edge_sh = o3.spherical_harmonics(range(self.lmax + 1), edge_vec, True, normalization='component')
-        edge_attr = torch.cat([data['edge_attr'], edge_sh], dim=1)
+        edge_attr = torch.cat([data_edges['edge_attr'], edge_sh], dim=1)
 
         # Edge length embedding
         edge_length = edge_vec.norm(dim=1)
@@ -80,9 +80,9 @@ class Embedding(nn.Module):
             basis='cosine',  # the cosine basis with cutoff = True goes to zero at max_radius
             cutoff=True,  # no need for an additional smooth cutoff
         ).mul(self.number_of_basis**0.5)
-        embed = self.embed(data['x'])
-        embed = self.mp1(embed, data['node_attr'], edge_src, edge_dst, edge_attr, edge_length_embedding)
-        return embed, data['node_attr'], edge_src, edge_dst, edge_attr, edge_length_embedding, batch
+        embed = self.embed(data_edges['x'])
+        embed = self.mp1(embed, data_edges['node_attr'], edge_src, edge_dst, edge_attr, edge_length_embedding)
+        return embed, data_edges['node_attr'], edge_src, edge_dst, edge_attr, edge_length_embedding, batch
 
 
 class EnergyPredictor(nn.Module):
@@ -189,14 +189,15 @@ class GeometricPhiPsiNet(LightningModule):
 
         self.name = 'geometric-phi-psi'
         self.test_criterion_initials = 'acc'
-        self.num_nodes = sample.num_nodes
+        data_edges, data_bonds = sample
+        self.num_nodes = data_edges.num_nodes
 
-        irreps_node_attr = o3.Irreps(f'{sample.node_attr.size(1)}x0e')
+        irreps_node_attr = o3.Irreps('0e')
         irreps_edge_attr = o3.Irreps('0e') + o3.Irreps.spherical_harmonics(lmax)
         irreps_embed_out = o3.Irreps(f'{mul}x0e+{mul}x0o+{mul//4}x1o+{mul//8}x2o')
         
         self.embedding = Embedding(
-            input_dim=sample.x.size(1),
+            input_dim=data_edges.x.size(1),
             irreps_node_attr=irreps_node_attr,
             irreps_edge_attr=irreps_edge_attr,
             irreps_node_out=irreps_embed_out,
@@ -205,7 +206,7 @@ class GeometricPhiPsiNet(LightningModule):
             mpn_layers=mpn_layers,
             max_radius=max_radius,
             number_of_basis=number_of_basis,
-            num_neighbors=sample.num_nodes
+            num_neighbors=self.num_nodes
         )
 
         self.energy_predictor = EnergyPredictor(
@@ -217,7 +218,7 @@ class GeometricPhiPsiNet(LightningModule):
             mul=mul,
             mpn_layers=mpn_layers,
             number_of_basis=number_of_basis,
-            num_neighbors=sample.num_nodes
+            num_neighbors=self.num_nodes
         )
 
         self.dihedrals_predictor = DihedralsPredictor(
@@ -229,11 +230,11 @@ class GeometricPhiPsiNet(LightningModule):
             mul=mul,
             mpn_layers=mpn_layers // 2,
             number_of_basis=number_of_basis,
-            num_neighbors=sample.num_nodes
+            num_neighbors=self.num_nodes
         )
 
-    def forward(self, data: Union[Data, Dict[str, torch.Tensor]]) -> torch.Tensor:
-        x, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch = self.embedding(data)
+    def forward(self, data_edges: Union[Data, Dict[str, torch.Tensor]], data_bonds: Union[Data, Dict[str, torch.Tensor]]) -> torch.Tensor:
+        x, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch = self.embedding(data_edges, data_bonds)
         return (
             self.energy_predictor(x, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch),
             self.dihedrals_predictor(x, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch)
@@ -255,12 +256,13 @@ class GeometricPhiPsiNet(LightningModule):
         return [opt_e, opt_d], []
     
     def training_step(self, data, data_idx, optimizer_idx):
-        x, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch = self.embedding(data)
+        date_edges, data_bonds = data
+        x, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch = self.embedding(date_edges, data_bonds)
 
         # train energy predictor
         if optimizer_idx == 0:
             y_hat = self.energy_predictor(x, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch)
-            e_loss = self.energy_loss(y_hat.squeeze(-1), data.e_label)
+            e_loss = self.energy_loss(y_hat.squeeze(-1), date_edges.e_label)
             tqdm_dict = {"e_loss": e_loss.item()}
             self.log_dict(tqdm_dict)
             output = OrderedDict({"loss": e_loss, "progress_bar": tqdm_dict, "log": tqdm_dict})
@@ -268,27 +270,28 @@ class GeometricPhiPsiNet(LightningModule):
         # train dihedrals predictor
         if optimizer_idx == 1:
             y_hat = self.dihedrals_predictor(x, node_attr, edge_src, edge_dst, edge_attr, edge_length_embedding, batch)
-            d_loss = self.dihedral_loss(y_hat.squeeze(-1), data.d_label)
+            d_loss = self.dihedral_loss(y_hat.squeeze(-1), date_edges.d_label)
             tqdm_dict = {"d_loss": d_loss.item()}
             self.log_dict(tqdm_dict)
             output = OrderedDict({"loss": d_loss, "progress_bar": tqdm_dict, "log": tqdm_dict})
             return output
     
     def test_step(self, data, data_idx):
+        data_edges, data_bonds = data
         dihedrals_predictions, dihedrals_targets, energy_predictions, energy_targets = [], [], [], []
         graph_indexes = []
 
-        y_hat_e, y_hat_d = self(data)
+        y_hat_e, y_hat_d = self(data_edges, data_bonds)
         for i in range(y_hat_d.size(0)):
             dihedrals_predictions.append(y_hat_d.squeeze(-1)[i].tolist())
-            dihedrals_targets.append(data.d_label[i].tolist())
+            dihedrals_targets.append(data_edges.dihedrals[i].tolist())
 
             energy_predictions.append(torch.argmax(y_hat_e.squeeze(-1)[i]))
-            energy_targets.append(torch.argmax(data.e_label[i]))
+            energy_targets.append(torch.argmax(data_edges.e_label[i]))
 
-            graph_indexes.append(data.graph_index[i])
+            graph_indexes.extend(data_edges.graph_index[i])
         
-        test_loss = self.energy_loss(y_hat_e.squeeze(-1), data.e_label)
+        test_loss = self.energy_loss(y_hat_e.squeeze(-1), data_edges.e_label)
         test_acc = torch.sum((torch.tensor(energy_predictions) == torch.tensor(energy_targets))) / (len(energy_targets) * 1.0)
         return {
             'test_acc': test_acc,

@@ -10,4 +10,4 @@ pip install -r requirements.txt
 
 pip install -U kaleido
 
-HOROVOD_WITH_GLOO=1 pip install --no-cache-dir horovod
+TMPDIR=/tmp HOROVOD_WITH_GLOO=1 pip install horovod

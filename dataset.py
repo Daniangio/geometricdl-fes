@@ -37,7 +37,7 @@ def real_number_to_binned_gaussian(real_numbers, bins):
     return p.unsqueeze(1).float()
 
 
-def create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals: bool, normalize_labels: bool=True, energy_levels: int=40):
+def create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals: bool, normalize_labels: bool=True, energy_levels: int=40, use_forces: bool=False):
     # Retrieve atom bonds
     df = pd.read_csv(os.path.join(data_dir, bonds_file), header=0, quotechar='"', converters={'bonds':ast.literal_eval, 'type':ast.literal_eval})
     src_atoms = df['index'].values
@@ -75,10 +75,10 @@ def create_transform(data_dir, labels_file, bonds_file, partial_charges_file, us
     else:
         phi_psi = None
         labels = None
-    return functools.partial(prepare_transform, data_dir=data_dir, use_dihedrals=use_dihedrals, phi_psi=phi_psi, bonds=bonds, bonds_attr=bonds_attr, partial_charges=partial_charges, labels=labels)
+    return functools.partial(prepare_transform, data_dir=data_dir, use_dihedrals=use_dihedrals, phi_psi=phi_psi, bonds=bonds, bonds_attr=bonds_attr, partial_charges=partial_charges, labels=labels, use_forces=use_forces)
 
 
-def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.Tensor, bonds: torch.Tensor, bonds_attr: torch.Tensor, partial_charges:torch.Tensor, labels: torch.Tensor):
+def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.Tensor, bonds: torch.Tensor, bonds_attr: torch.Tensor, partial_charges:torch.Tensor, labels: torch.Tensor, use_forces:bool=False):
     # t = time.time()
     dihedrals = phi_psi[item['graph_index']]
     e_label = labels[item['graph_index']]
@@ -147,7 +147,7 @@ def prepare_transform(item, data_dir: str, use_dihedrals: bool, phi_psi: torch.T
 
     # Retrieve atom forces
     forces_dir = os.path.join(data_dir, 'forces')
-    if os.path.exists(forces_dir):
+    if use_forces and os.path.exists(forces_dir):
         df = pd.read_csv(os.path.join(forces_dir, f'{item["graph_index"]}.csv'), header=0, quotechar='"')
         forces = torch.Tensor(df[['Fx', 'Fy', 'Fz']].values)
     else:
@@ -215,7 +215,7 @@ class Dataset(BaseDataset):
                  forces=forces,
                  e_label=e_label,
                  elements=elements,
-                 graph_index=self.indexes[i])
+                 graph_index=[self.indexes[i]])
         d_bonds = Data(x=node_input,
                  pos=pos,
                  edge_index=bonds,
@@ -225,7 +225,7 @@ class Dataset(BaseDataset):
                  forces=forces,
                  e_label=e_label,
                  elements=elements,
-                 graph_index=self.indexes[i])
+                 graph_index=[self.indexes[i]])
         return d_edges, d_bonds
 
     def __len__(self):

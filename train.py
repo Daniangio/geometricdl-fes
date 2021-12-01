@@ -1,4 +1,5 @@
 # horovodrun -np 2 python3 train.py --epoch 30 --weights results/right/linear-old-0929-1139-mae\:0.07/parameters.pt
+# CUDA_VISIBLE_DEVICES=1 python3 train.py --epoch 50 --lr 0.001 --test-on all --batch-size 64 --test-batch-size 96 --model geometricv2 --n-samples 50000
 
 import argparse
 from datetime import datetime
@@ -23,6 +24,7 @@ import horovod.torch as hvd
 from torch_geometric.data.data import Data
 from models.geometric import GeometricNet
 from models.geometricphipsi import GeometricPhiPsiNet
+from models.geometricv2 import GeometricNetV2
 
 from models.linear import LinearNet
 from models.graphdihedrals import GraphConvPoolNet
@@ -190,7 +192,7 @@ def save_results(model, train_indexes, test_indexes, test_results: dict, test_on
             "energy_predicted": sorted_energy_predictions,
             "energy_target": sorted_energy_targets,
             "test_frames": sorted(graph_indexes),
-            "train_frames": train_indexes,
+            "train_frames": sorted(train_indexes),
         }
     
     if test_results.get('dihedrals_predictions') is not None:
@@ -228,7 +230,8 @@ if __name__ == '__main__':
         'linear': (LinearNet, True), # Model, use_dihedrals
         'graph': (GraphConvPoolNet, True),
         'geometric': (GeometricNet, False),
-        'geometricphipsi': (GeometricPhiPsiNet, False)
+        'geometricv2': (GeometricNetV2, False),
+        'geometric-phi-psi': (GeometricPhiPsiNet, False)
     }
 
     # get data
@@ -241,7 +244,7 @@ if __name__ == '__main__':
         with FileLock(os.path.expanduser("~/.horovod_lock")):
             train_indexes, validation_indexes, test_indexes = load_indexes(data_dir, test_on, n_samples=int(args.n_samples))
 
-            transform = create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals=models[args.model][1])
+            transform = create_transform(data_dir, labels_file, bonds_file, partial_charges_file, use_dihedrals=models[args.model][1], energy_levels=40)
             train_dataset = Dataset(data_dir=data_dir, indexes=train_indexes, transform=transform, use_dihedrals=models[args.model][1])
             test_dataset = Dataset(data_dir=data_dir, indexes=test_indexes, transform=transform, use_dihedrals=models[args.model][1])
 
@@ -279,7 +282,7 @@ if __name__ == '__main__':
             if args.weights:
                 print(f'Loading model weights  {args.weights}')
                 try:
-                    model.load_state_dict(torch.load(args.weights), strict=False)
+                    model.load_state_dict(torch.load(args.weights), strict=True)
                     print(f'Model weights {args.weights} loaded')
                 except Exception as e:
                     print(f'Model weights could not be loaded: {str(e)}')
